@@ -339,11 +339,11 @@ Status BuildComputation(
     const std::vector<int>& arg_cores,
     const std::vector<XlaExpression>& retvals,
     const std::vector<std::unique_ptr<XlaResource>>& resources,
-    bool return_updated_values_for_all_resources,
-    xla::ComputationBuilder* builder, xla::Computation* computation,
-    int* num_computation_outputs, int* num_nonconst_outputs,
+    bool return_updated_values_for_all_resources, xla::XlaBuilder* builder,
+    xla::XlaComputation* computation, int* num_computation_outputs,
+    int* num_nonconst_outputs,
     std::vector<XlaCompiler::ResourceUpdate>* resource_updates) {
-  std::vector<xla::ComputationDataHandle> elems;
+  std::vector<xla::XlaOp> elems;
   elems.reserve(retvals.size());
   for (const XlaExpression& retval : retvals) {
     if (!retval.has_constant_value()) {
@@ -365,18 +365,23 @@ Status BuildComputation(
               return a->arg_num() < b->arg_num();
             });
 
+  // Attach a common operator name as metadata. This has no semantic effect — it
+  // merely makes the HLO graph more readable when visualized via TensorBoard,
+  // since TensorBoard forms groups out of operators with similar names.
+  xla::OpMetadata retval_metadata;
+  retval_metadata.set_op_name("XLA_Retvals");
+  builder->SetOpMetadata(retval_metadata);
+
   for (const XlaResource* resource : arg_resources) {
     const XlaCompiler::Argument& arg = args[resource->arg_num()];
     const int core = arg_cores[resource->arg_num()];
     DCHECK_LT(resource->arg_num(), arg_cores.size());
-    bool modified =
-        resource->value().handle() != resource->initial_value().handle();
+    bool modified = resource->value() != resource->initial_value();
     // TensorArray gradients were modified if their values changed or there are
     // any newly created gradients.
     for (const auto& grad : resource->tensor_array_gradients()) {
       modified = modified ||
-                 grad.second->value().handle() !=
-                     grad.second->initial_value().handle() ||
+                 grad.second->value() != grad.second->initial_value() ||
                  arg.tensor_array_gradients.count(grad.first) == 0;
     }
     if (return_updated_values_for_all_resources || modified) {
@@ -391,11 +396,11 @@ Status BuildComputation(
       }
 
       // Request that the value be returned on a specific core.
-      xla::ScopedShardingAssignment assign_sharding(
+      xla::XlaScopedShardingAssignment assign_sharding(
           builder, core == -1 ? tensorflow::gtl::optional<xla::OpSharding>()
                               : xla::sharding_builder::AssignDevice(core));
 
-      xla::ComputationDataHandle handle;
+      xla::XlaOp handle;
       TF_RETURN_IF_ERROR(resource->Pack(&handle, builder));
 
       // Since we can't change the sharding metadata of <value> as this point,
@@ -412,7 +417,9 @@ Status BuildComputation(
 
   // Builds the XLA computation.
   builder->Tuple(elems);
-  xla::StatusOr<xla::Computation> computation_status = builder->Build();
+  builder->ClearOpMetadata();
+
+  xla::StatusOr<xla::XlaComputation> computation_status = builder->Build();
   if (!computation_status.ok()) {
     return computation_status.status();
   }
@@ -426,7 +433,7 @@ Status BuildComputation(
 // `args` are the arguments to the computation.
 Status XlaCompiler::BuildArguments(
     const Graph& graph, const std::vector<XlaCompiler::Argument>& args,
-    bool use_tuple_arg, xla::ComputationBuilder* builder, XlaContext* context,
+    bool use_tuple_arg, xla::XlaBuilder* builder, XlaContext* context,
     std::vector<int>* arg_cores, std::vector<XlaExpression>* arg_expressions,
     std::vector<int>* input_mapping, std::vector<xla::Shape>* input_shapes,
     bool is_entry_computation) {
@@ -452,8 +459,7 @@ Status XlaCompiler::BuildArguments(
         // alias.
         XlaResource* resource;
         TF_RETURN_IF_ERROR(context->CreateResource(
-            arg.resource_kind, i, arg.name, arg.type, arg.shape,
-            xla::ComputationDataHandle(),
+            arg.resource_kind, i, arg.name, arg.type, arg.shape, xla::XlaOp(),
             /*tensor_array_size=*/arg.tensor_array_size,
             /*tensor_array_gradients=*/arg.tensor_array_gradients, &resource));
         arg_expression.set_resource(resource);
@@ -514,10 +520,17 @@ Status XlaCompiler::BuildArguments(
     }
   }
 
+  // Attach a common operator name as metadata. This has no semantic effect — it
+  // merely makes the HLO graph more readable when visualized via TensorBoard,
+  // since TensorBoard forms groups out of operators with similar names.
+  xla::OpMetadata arg_metadata;
+  arg_metadata.set_op_name("XLA_Args");
+  builder->SetOpMetadata(arg_metadata);
+
   // Build parameter handles for non-constant arguments.
-  std::vector<xla::ComputationDataHandle> arg_handles(input_mapping->size());
+  std::vector<xla::XlaOp> arg_handles(input_mapping->size());
   if (use_tuple_arg) {
-    xla::ComputationDataHandle tuple;
+    xla::XlaOp tuple;
     if (is_entry_computation) {
       xla::OpSharding tuple_sharding;
       tuple_sharding.set_type(xla::OpSharding::Type::OpSharding_Type_TUPLE);
@@ -528,15 +541,15 @@ Status XlaCompiler::BuildArguments(
             core == -1 ? xla::sharding_builder::AssignDevice(root_device)
                        : xla::sharding_builder::AssignDevice(core);
       }
-      xla::ScopedShardingAssignment assign_tuple_sharding(builder,
-                                                          tuple_sharding);
+      xla::XlaScopedShardingAssignment assign_tuple_sharding(builder,
+                                                             tuple_sharding);
       tuple = builder->Parameter(0, (*input_shapes)[0], "arg_tuple");
     } else {
       tuple = builder->Parameter(0, (*input_shapes)[0], "arg_tuple");
     }
     for (std::vector<int>::size_type i = 0; i < input_mapping->size(); ++i) {
       const int core = (*arg_cores)[input_mapping->at(i)];
-      xla::ScopedShardingAssignment assign_sharding(
+      xla::XlaScopedShardingAssignment assign_sharding(
           builder, core == -1 ? tensorflow::gtl::optional<xla::OpSharding>()
                               : xla::sharding_builder::AssignDevice(core));
       arg_handles[i] = builder->GetTupleElement(tuple, i);
@@ -544,13 +557,15 @@ Status XlaCompiler::BuildArguments(
   } else {
     for (std::vector<int>::size_type i = 0; i < input_mapping->size(); ++i) {
       const int core = (*arg_cores)[input_mapping->at(i)];
-      xla::ScopedShardingAssignment assign_sharding(
+      xla::XlaScopedShardingAssignment assign_sharding(
           builder, core == -1 ? tensorflow::gtl::optional<xla::OpSharding>()
                               : xla::sharding_builder::AssignDevice(core));
       arg_handles[i] =
           builder->Parameter(i, (*input_shapes)[i], strings::StrCat("arg", i));
     }
   }
+
+  builder->ClearOpMetadata();
 
   // Fill in the handles in non-constant arguments.
   VLOG(2) << "XLA computation inputs:";
@@ -582,12 +597,54 @@ Status XlaCompiler::BuildArguments(
   return Status::OK();
 }
 
+Status XlaCompiler::CompileSingleOp(
+    const XlaCompiler::CompileOptions& options, string const& name,
+    OpKernelContext* ctx, const std::vector<XlaCompiler::Argument>& args,
+    CompilationResult* result) {
+  // TODO(b/74182462): We implement this by creating a new dummy Graph including
+  // _Arg nodes, and let CompileGraph walk it. This could be optimized.
+  std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+
+  Status status;
+  // First create the actual node we care about computing.
+  Node* main_node = graph->AddNode(ctx->op_kernel().def(), &status);
+  TF_RETURN_IF_ERROR(status);
+
+  // Create dummy _Arg nodes. Link these to `node` and also via a control
+  // dependency edge to the _SOURCE node.
+  for (int64 i = 0; i < ctx->num_inputs(); ++i) {
+    Node* node;
+    string name = strings::StrCat(ctx->op_kernel().name(), "_", i, "_arg");
+    Status status = NodeBuilder(name, "_Arg")
+                        .ControlInput(graph->source_node())
+                        .Attr("T", ctx->input_dtype(i))
+                        .Attr("index", i)
+                        .Finalize(graph.get(), &node);
+    TF_RETURN_IF_ERROR(status);
+    graph->AddEdge(node, 0, main_node, i);
+  }
+
+  // Similarly with return values, create dummy _Retval nodes fed by `node`.
+  for (int64 i = 0; i < ctx->num_outputs(); ++i) {
+    Node* node;
+    string name = strings::StrCat(ctx->op_kernel().name(), "_", i, "_retval");
+    Status status = NodeBuilder(name, "_Retval")
+                        .Input(main_node, i)
+                        .Attr("T", ctx->expected_output_dtype(i))
+                        .Attr("index", i)
+                        .Finalize(graph.get(), &node);
+    TF_RETURN_IF_ERROR(status);
+  }
+
+  return CompileGraph(options, name, std::move(graph), args, result);
+}
+
 Status XlaCompiler::CompileGraph(const XlaCompiler::CompileOptions& options,
                                  string const& name,
                                  std::unique_ptr<Graph> graph,
                                  const std::vector<XlaCompiler::Argument>& args,
                                  CompilationResult* result) {
-  VLOG(1) << "Executing graph symbolically to populate ComputationBuilder.";
+  VLOG(1) << "Executing graph symbolically to populate XlaBuilder.";
 
   if (VLOG_IS_ON(2)) {
     VLOG(2) << "XlaCompiler::CompileGraph: "
@@ -603,7 +660,7 @@ Status XlaCompiler::CompileGraph(const XlaCompiler::CompileOptions& options,
   TF_RETURN_IF_ERROR(
       FunctionalizeControlFlow(graph.get(), local_flib_def_.get()));
 
-  xla::ComputationBuilder builder(client(), name);
+  xla::XlaBuilder builder(name);
   XlaContext* context =
       new XlaContext(this, &builder, options_.allow_cpu_custom_calls,
                      options.resolve_compile_time_constants,
@@ -623,7 +680,7 @@ Status XlaCompiler::CompileGraph(const XlaCompiler::CompileOptions& options,
 
   int num_nonconst_outputs;
   int num_computation_outputs;
-  result->computation = std::make_shared<xla::Computation>();
+  result->computation = std::make_shared<xla::XlaComputation>();
   TF_RETURN_IF_ERROR(BuildComputation(
       args, arg_cores, context->retvals(), context->resources(),
       options.return_updated_values_for_all_resources, &builder,
@@ -656,6 +713,14 @@ Status XlaCompiler::CompileGraph(const XlaCompiler::CompileOptions& options,
   VLOG(2) << "XLA output shape: "
           << xla::ShapeUtil::HumanString(result->xla_output_shape);
 
+  // Copy the host transfer metadata to the result.
+  for (const auto& send : host_compute_sends_) {
+    *result->host_compute_metadata.add_device_to_host() = send.second;
+  }
+  for (const auto& recv : host_compute_recvs_) {
+    *result->host_compute_metadata.add_host_to_device() = recv.second;
+  }
+
   // Tensorflow expects a major-to-minor order of results.
   xla::LayoutUtil::SetToDefaultLayout(&result->xla_output_shape);
 
@@ -687,6 +752,86 @@ Status XlaCompiler::GetChannelHandle(const string& key,
   }
   *channel = result.first->second;
   VLOG(1) << "Channel: " << key << " " << channel->DebugString();
+  return Status::OK();
+}
+
+namespace {
+
+void SetTransfer(const string& key, gtl::ArraySlice<DataType> types,
+                 gtl::ArraySlice<TensorShape> shapes,
+                 tf2xla::HostTransferMetadata* transfer) {
+  transfer->set_key(key);
+  CHECK(types.size() == shapes.size());
+  for (int i = 0; i < types.size(); ++i) {
+    tf2xla::TensorMetadata* metadata = transfer->add_metadata();
+    metadata->set_type(types[i]);
+    shapes[i].AsProto(metadata->mutable_shape());
+  }
+}
+
+}  // namespace
+
+Status XlaCompiler::SetDeviceToHostMetadata(
+    const string& key, gtl::ArraySlice<DataType> types,
+    gtl::ArraySlice<TensorShape> shapes) {
+  if (host_compute_sends_.find(key) != host_compute_sends_.end()) {
+    return errors::InvalidArgument(
+        "Duplicate calls to SetDeviceToHostMetadata with key ", key);
+  }
+  tf2xla::HostTransferMetadata& transfer = host_compute_sends_[key];
+  SetTransfer(key, types, shapes, &transfer);
+  return Status::OK();
+}
+
+Status XlaCompiler::GetDeviceToHostShapes(
+    const string& key, std::vector<TensorShape>* shapes) const {
+  const auto iter = host_compute_sends_.find(key);
+  if (iter == host_compute_sends_.end()) {
+    return errors::InvalidArgument(
+        "No host compute send shapes registered for key ", key);
+  }
+  shapes->clear();
+  for (int i = 0; i < iter->second.metadata_size(); ++i) {
+    TensorShape shape(iter->second.metadata(i).shape());
+    shapes->push_back(shape);
+  }
+  return Status::OK();
+}
+
+Status XlaCompiler::SetHostToDeviceMetadata(
+    const string& key, gtl::ArraySlice<DataType> types,
+    gtl::ArraySlice<TensorShape> shapes) {
+  if (host_compute_recvs_.find(key) != host_compute_sends_.end()) {
+    return errors::InvalidArgument(
+        "Duplicate calls to SetHostToDeviceMetadata with key ", key);
+  }
+  tf2xla::HostTransferMetadata& transfer = host_compute_recvs_[key];
+  SetTransfer(key, types, shapes, &transfer);
+  return Status::OK();
+}
+
+Status XlaCompiler::GetHostComputeControlDependency(
+    const string& host_compute_name, xla::XlaOp* handle) {
+  const auto iter = host_compute_control_output_.find(host_compute_name);
+  if (iter == host_compute_control_output_.end()) {
+    return errors::InvalidArgument(
+        "No registered control handle for host compute Op '", host_compute_name,
+        "'");
+  } else {
+    *handle = iter->second;
+  }
+  return Status::OK();
+}
+
+Status XlaCompiler::SetHostComputeControlDependency(
+    const string& host_compute_name, const xla::XlaOp& handle) {
+  if (host_compute_control_output_.find(host_compute_name) !=
+      host_compute_control_output_.end()) {
+    return errors::InvalidArgument(
+        "Duplicate control handles registered for for host compute Op ",
+        host_compute_name);
+  }
+  host_compute_control_output_[host_compute_name] = handle;
   return Status::OK();
 }
 

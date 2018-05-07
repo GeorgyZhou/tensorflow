@@ -413,7 +413,7 @@ void RecomputeSubgraph(
 }
 
 void RecomputationRewritingPass(RewriterConfig::MemOptType optimization_level,
-                                const string& recomputation_targets_name_prefix,
+                                const string& recomputation_targets_name_scope,
                                 GraphDef* graph, const GrapplerItem& item) {
   if (optimization_level != RewriterConfig::RECOMPUTATION_HEURISTICS &&
       optimization_level != RewriterConfig::HEURISTICS &&
@@ -438,15 +438,14 @@ void RecomputationRewritingPass(RewriterConfig::MemOptType optimization_level,
     feeds.insert(NodeName(feed.first));
   }
   std::function<bool(const NodeDef&)> is_target =
-      [&recomputation_targets_name_prefix](const NodeDef& node) {
-        // Nodes whose inputs we may want to recompute. Typically targets will
-        // be gradients (recomputation_targets_name_prefix="gradients/"),
-        // although the prefix is configurable since gradients may be created
-        // in a name scope.
-        // TODO(allenl): Use a static schedule
-        // (grappler::EstimateEarliestExecutionTimes) to recompute only nodes
-        // whose outputs will sit around for a while.
-        return node.name().find(recomputation_targets_name_prefix) == 0;
+      [&recomputation_targets_name_scope](const NodeDef& node) {
+        // Nodes whose inputs we may want to recompute. This matches node names
+        // that contain recomputation_targets_name_scope as a name scope,
+        // meaning it either begins with or contains the name scope.
+        // Defaults to "gradients/" which will match any node names that begins
+        // with "gradients/" or contains "/gradients/".
+        return node.name().find(recomputation_targets_name_scope) == 0 ||
+               node.name().find("/" + recomputation_targets_name_scope) != -1;
       };
 
   if (optimization_level == RewriterConfig::RECOMPUTATION_HEURISTICS ||
@@ -720,18 +719,19 @@ Status BuildSwapPair(NodeDef* node, int input_to_swap,
   // Force the tensor to be copied to cpu.
   NodeDef* swap_out_node = graph->add_node();
   swap_out_node->set_name(swap_out_name);
-  swap_out_node->set_op("Identity");
-  swap_out_node->set_device("/device:CPU:0");
+  swap_out_node->set_op("_CopyFromGpuToHost");
 
   // Force the tensor to be restored to the device.
   NodeDef* swap_in_node = graph->add_node();
   swap_in_node->set_name(swap_in_name);
-  swap_in_node->set_op("Identity");
+  swap_in_node->set_op("_CopyFromHostToGpu");
   *swap_in_node->add_input() = swap_out_node->name();
 
-  // Colocate the swap_in_ node with the node itself.
+  // Colocate the swap_out_ and swap_in_ nodes with the node itself.
+  swap_out_node->set_device(node->device());
   swap_in_node->set_device(node->device());
   string coloc_group = strings::StrCat("loc@", tensor_to_swap);
+  (*swap_out_node->mutable_attr())["_class"].mutable_list()->add_s(coloc_group);
   (*swap_in_node->mutable_attr())["_class"].mutable_list()->add_s(coloc_group);
   (*node->mutable_attr())["_class"].mutable_list()->add_s(coloc_group);
 
@@ -1104,7 +1104,8 @@ bool SwappingPass(RewriterConfig::MemOptType optimization_level,
                   Cluster* cluster, GrapplerItem* item,
                   std::unordered_set<string>* skip_list) {
   std::unordered_map<NodeDef*, SwapInfo> nodes_to_swap;
-  if (optimization_level == RewriterConfig::SWAPPING_HEURISTICS ||
+  if (optimization_level == RewriterConfig::DEFAULT_MEM_OPT ||
+      optimization_level == RewriterConfig::SWAPPING_HEURISTICS ||
       optimization_level == RewriterConfig::HEURISTICS) {
     // Use heuristics to figure out what needs to be swapped;
     IdentifySwappingCandidates(cluster, item, skip_list, &nodes_to_swap);
@@ -1218,15 +1219,89 @@ bool SwappingPass(RewriterConfig::MemOptType optimization_level,
   return updated_graph;
 }
 
+// TODO(rmlarsen): Add distributed TF test.
+Status RelaxAllocatorConstraints(GraphDef* optimized_graph) {
+  std::unordered_set<string> devices;
+  std::vector<int> assign_nodes;
+  bool found_send = false;
+  for (int i = 0; i < optimized_graph->node_size(); ++i) {
+    const NodeDef& node = optimized_graph->node(i);
+    devices.insert(node.device());
+    if (IsAssign(node)) {
+      assign_nodes.push_back(i);
+    }
+    if (IsSend(node)) {
+      found_send = true;
+      break;
+    }
+  }
+  if (!found_send && devices.size() == 1) {
+    for (int assign_idx : assign_nodes) {
+      // Set an attribute telling AssignOp to ignore allocator constraints.
+      NodeDef* assign_node = optimized_graph->mutable_node(assign_idx);
+      (*assign_node->mutable_attr())["_grappler_relax_allocator_constraints"]
+          .set_b(true);
+    }
+    return Status::OK();
+  }
+
+  std::unordered_set<int> optimized_nodes;
+  SimpleGraphView graph_view;
+  TF_RETURN_IF_ERROR(graph_view.Initialize(*optimized_graph));
+  for (int i : assign_nodes) {
+    if (optimized_nodes.find(i) == optimized_nodes.end()) {
+      const NodeDef& node = optimized_graph->node(i);
+      optimized_nodes.insert(i);
+      std::vector<int> assign_nodes_in_fanout;
+      assign_nodes_in_fanout.push_back(i);
+      std::set<int> transitive_fanout;
+      graph_view.DepthFirstSearch(std::unordered_set<string>{}, i,
+                                  &transitive_fanout);
+      const string& assign_device = node.device();
+      bool relax_constraint = true;
+      // If all nodes in the transitive fanout are on the same device as the
+      // assign node, there is no need to allocate the output in pinned memory.
+      for (int fanout : transitive_fanout) {
+        const NodeDef& fanout_node = optimized_graph->node(fanout);
+        if (relax_constraint &&
+            (fanout_node.device() != assign_device || IsSend(fanout_node))) {
+          relax_constraint = false;
+        }
+        if (optimized_nodes.find(fanout) == optimized_nodes.end() &&
+            IsAssign(fanout_node)) {
+          assign_nodes_in_fanout.push_back(fanout);
+        }
+      }
+
+      for (int assign_idx : assign_nodes_in_fanout) {
+        if (relax_constraint) {
+          // If all devices match in fanout of node(i) then, by transitivity,
+          // they must also match in the fanout of other assign nodes
+          // node(assign_idx) in the fanout, so we can process them here,
+          // and save computing their transitive fanout later.
+          optimized_nodes.insert(assign_idx);
+
+          // Set an attribute telling AssignOp to ignore allocator constraints.
+          NodeDef* assign_node = optimized_graph->mutable_node(assign_idx);
+          (*assign_node
+                ->mutable_attr())["_grappler_relax_allocator_constraints"]
+              .set_b(true);
+        }
+      }
+    }
+  }
+  return Status::OK();
+}
+
 Status MemoryOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
                                  GraphDef* optimized_graph) {
   *optimized_graph = item.graph;
 
   RecomputationRewritingPass(optimization_level_,
-                             recomputation_targets_name_prefix_,
-                             optimized_graph, item);
+                             recomputation_targets_name_scope_, optimized_graph,
+                             item);
 
-  GrapplerItem optimized_item(item, std::move(*optimized_graph));
+  GrapplerItem optimized_item(item, optimized_graph);
   std::unordered_set<string> skip_list;
   // Bound the number of rewrite passes to avoid long processing times on graphs
   // that simply won't fit in memory.
@@ -1240,7 +1315,8 @@ Status MemoryOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
       updated_graph |= SchedulingPass(cluster, &optimized_item);
     }
 
-    if ((optimization_level_ == RewriterConfig::SWAPPING_HEURISTICS ||
+    if ((optimization_level_ == RewriterConfig::DEFAULT_MEM_OPT ||
+         optimization_level_ == RewriterConfig::SWAPPING_HEURISTICS ||
          optimization_level_ == RewriterConfig::HEURISTICS ||
          optimization_level_ == RewriterConfig::MANUAL) &&
         cluster != nullptr) {
@@ -1248,6 +1324,8 @@ Status MemoryOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
                                     &optimized_item, &skip_list);
     }
   }
+
+  TF_RETURN_IF_ERROR(RelaxAllocatorConstraints(&optimized_item.graph));
 
   optimized_graph->Swap(&optimized_item.graph);
   return Status::OK();

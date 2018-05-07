@@ -132,7 +132,8 @@ class SavedModelBuilder(object):
       if not file_io.file_exists(asset_destination_filepath):
         file_io.copy(asset_source_filepath, asset_destination_filepath)
 
-    tf_logging.info("Assets written to: %s", assets_destination_dir)
+    tf_logging.info("Assets written to: %s",
+                    compat.as_text(assets_destination_dir))
 
   def _maybe_add_legacy_init_op(self, legacy_init_op=None):
     """Add legacy init op to the SavedModel.
@@ -193,7 +194,8 @@ class SavedModelBuilder(object):
   def _validate_tensor_info(self, tensor_info):
     """Validates the `TensorInfo` proto.
 
-    Checks if the `name` and `dtype` fields exist and are non-empty.
+    Checks if the `encoding` (`name` or `coo_sparse`) and `dtype` fields exist
+    and are non-empty.
 
     Args:
       tensor_info: `TensorInfo` protocol buffer to validate.
@@ -206,10 +208,12 @@ class SavedModelBuilder(object):
       raise AssertionError(
           "All TensorInfo protos used in the SignatureDefs must have the name "
           "and dtype fields set.")
-    if not tensor_info.name:
+    if tensor_info.WhichOneof("encoding") is None:
+      # TODO(soergel) validate each of the fields of coo_sparse
       raise AssertionError(
-          "All TensorInfo protos used in the SignatureDefs must have the name "
-          "field set: %s" % tensor_info)
+          "All TensorInfo protos used in the SignatureDefs must have one of "
+          "the 'encoding' fields (e.g., name or coo_sparse) set: %s"
+          % tensor_info)
     if tensor_info.dtype is types_pb2.DT_INVALID:
       raise AssertionError(
           "All TensorInfo protos used in the SignatureDefs must have the dtype "
@@ -438,7 +442,7 @@ class SavedModelBuilder(object):
           compat.as_bytes(self._export_dir),
           compat.as_bytes(constants.SAVED_MODEL_FILENAME_PB))
       file_io.write_string_to_file(path, self._saved_model.SerializeToString())
-    tf_logging.info("SavedModel written to: %s", path)
+    tf_logging.info("SavedModel written to: %s", compat.as_text(path))
 
     return path
 

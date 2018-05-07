@@ -36,6 +36,7 @@ limitations under the License.
 #include "tensorflow/core/platform/cloud/curl_http_request.h"
 #include "tensorflow/core/platform/cloud/file_block_cache.h"
 #include "tensorflow/core/platform/cloud/google_auth_provider.h"
+#include "tensorflow/core/platform/cloud/ram_file_block_cache.h"
 #include "tensorflow/core/platform/cloud/retrying_utils.h"
 #include "tensorflow/core/platform/cloud/time_util.h"
 #include "tensorflow/core/platform/env.h"
@@ -102,7 +103,7 @@ constexpr char kResolveCacheSecs[] = "GCS_RESOLVE_REFRESH_SECS";
 // The environment variable to configure the http request's connection timeout.
 constexpr char kRequestConnectionTimeout[] =
     "GCS_REQUEST_CONNECTION_TIMEOUT_SECS";
-// The environment varaible to configure the http request's idle timeout.
+// The environment variable to configure the http request's idle timeout.
 constexpr char kRequestIdleTimeout[] = "GCS_REQUEST_IDLE_TIMEOUT_SECS";
 // The environment variable to configure the overall request timeout for
 // metadata requests.
@@ -166,13 +167,13 @@ Status ParseGcsPath(StringPiece fname, bool empty_object_ok, string* bucket,
     return errors::InvalidArgument("GCS path doesn't start with 'gs://': ",
                                    fname);
   }
-  *bucket = bucketp.ToString();
+  *bucket = std::string(bucketp);
   if (bucket->empty() || *bucket == ".") {
     return errors::InvalidArgument("GCS path doesn't contain a bucket name: ",
                                    fname);
   }
-  objectp.Consume("/");
-  *object = objectp.ToString();
+  str_util::ConsumePrefix(&objectp, "/");
+  *object = std::string(objectp);
   if (!empty_object_ok && object->empty()) {
     return errors::InvalidArgument("GCS path doesn't contain an object name: ",
                                    fname);
@@ -211,7 +212,7 @@ std::set<string> AddAllSubpaths(const std::vector<string>& paths) {
   for (const string& path : paths) {
     StringPiece subpath = io::Dirname(path);
     while (!subpath.empty()) {
-      result.emplace(subpath.ToString());
+      result.emplace(std::string(subpath));
       subpath = io::Dirname(subpath);
     }
   }
@@ -300,6 +301,14 @@ class GcsRandomAccessFile : public RandomAccessFile {
     TF_RETURN_IF_ERROR(file_block_cache_->Read(filename_, offset, n, scratch,
                                                &bytes_transferred));
     *result = StringPiece(scratch, bytes_transferred);
+    string checkpoint_ending = "/checkpoint";
+    // Check if the file is the checkpoint file as we should not be caching
+    // that. As it's contents are updated and used for iterating checkpoints.
+    if (std::equal(checkpoint_ending.rbegin(), checkpoint_ending.rend(),
+                   filename_.rbegin())) {
+      // Remove the checkpoint file from the cache
+      file_block_cache_->RemoveFile(filename_);
+    }
     if (bytes_transferred < n) {
       // This is not an error per se. The RandomAccessFile interface expects
       // that Read returns OutOfRange if fewer bytes were read than requested.
@@ -534,7 +543,8 @@ class GcsWritableFile : public WritableFile {
       *uploaded = 0;
     } else {
       StringPiece range_piece(received_range);
-      range_piece.Consume("bytes=");  // May or may not be present.
+      str_util::ConsumePrefix(&range_piece,
+                              "bytes=");  // May or may not be present.
       std::vector<int64> range_parts;
       if (!str_util::SplitAndParseAsInts(range_piece, '-', &range_parts) ||
           range_parts.size() != 2) {
@@ -694,7 +704,7 @@ GcsFileSystem::GcsFileSystem()
 
       if (!header_name.empty() && !header_value.empty()) {
         additional_header_.reset(new std::pair<const string, const string>(
-            header_name.ToString(), header_value.ToString()));
+            std::string(header_name), std::string(header_value)));
 
         VLOG(1) << "GCS additional header ENABLED. "
                 << "Name: " << additional_header_->first << ", "
@@ -783,13 +793,13 @@ Status GcsFileSystem::NewRandomAccessFile(
 // A helper function to build a FileBlockCache for GcsFileSystem.
 std::unique_ptr<FileBlockCache> GcsFileSystem::MakeFileBlockCache(
     size_t block_size, size_t max_bytes, uint64 max_staleness) {
-  std::unique_ptr<FileBlockCache> file_block_cache(
-      new FileBlockCache(block_size, max_bytes, max_staleness,
-                         [this](const string& filename, size_t offset, size_t n,
-                                char* buffer, size_t* bytes_transferred) {
-                           return LoadBufferFromGCS(filename, offset, n, buffer,
-                                                    bytes_transferred);
-                         }));
+  std::unique_ptr<FileBlockCache> file_block_cache(new RamFileBlockCache(
+      block_size, max_bytes, max_staleness,
+      [this](const string& filename, size_t offset, size_t n, char* buffer,
+             size_t* bytes_transferred) {
+        return LoadBufferFromGCS(filename, offset, n, buffer,
+                                 bytes_transferred);
+      }));
   return file_block_cache;
 }
 
@@ -812,6 +822,10 @@ Status GcsFileSystem::LoadBufferFromGCS(const string& filename, size_t offset,
   request->SetResultBufferDirect(buffer, n);
   request->SetTimeouts(timeouts_.connect, timeouts_.idle, timeouts_.read);
 
+  if (stats_ != nullptr) {
+    stats_->RecordBlockLoadRequest(filename, offset);
+  }
+
   TF_RETURN_WITH_CONTEXT_IF_ERROR(request->Send(), " when reading gs://",
                                   bucket, "/", object);
 
@@ -820,9 +834,13 @@ Status GcsFileSystem::LoadBufferFromGCS(const string& filename, size_t offset,
   VLOG(1) << "Successful read of gs://" << bucket << "/" << object << " @ "
           << offset << " of size: " << bytes_read;
 
+  if (stats_ != nullptr) {
+    stats_->RecordBlockRetrieved(filename, offset, bytes_read);
+  }
+
   throttle_.RecordResponse(bytes_read);
 
-  if (bytes_read < block_size()) {
+  if (bytes_read < n) {
     // Check stat cache to see if we encountered an interrupted read.
     FileStatistics stat;
     if (stat_cache_->Lookup(filename, &stat)) {
@@ -839,14 +857,20 @@ Status GcsFileSystem::LoadBufferFromGCS(const string& filename, size_t offset,
   return Status::OK();
 }
 
+void GcsFileSystem::ClearFileCaches(const string& fname) {
+  file_block_cache_->RemoveFile(fname);
+  stat_cache_->Delete(fname);
+  // TODO(rxsang): Remove the patterns that matche the file in
+  // MatchingPathsCache as well.
+}
+
 Status GcsFileSystem::NewWritableFile(const string& fname,
                                       std::unique_ptr<WritableFile>* result) {
   string bucket, object;
   TF_RETURN_IF_ERROR(ParseGcsPath(fname, false, &bucket, &object));
-  result->reset(new GcsWritableFile(
-      bucket, object, this, &timeouts_,
-      [this, fname]() { file_block_cache_->RemoveFile(fname); },
-      initial_retry_delay_usec_));
+  result->reset(new GcsWritableFile(bucket, object, this, &timeouts_,
+                                    [this, fname]() { ClearFileCaches(fname); },
+                                    initial_retry_delay_usec_));
   return Status::OK();
 }
 
@@ -886,8 +910,7 @@ Status GcsFileSystem::NewAppendableFile(const string& fname,
   TF_RETURN_IF_ERROR(ParseGcsPath(fname, false, &bucket, &object));
   result->reset(new GcsWritableFile(
       bucket, object, this, old_content_filename, &timeouts_,
-      [this, fname]() { file_block_cache_->RemoveFile(fname); },
-      initial_retry_delay_usec_));
+      [this, fname]() { ClearFileCaches(fname); }, initial_retry_delay_usec_));
   return Status::OK();
 }
 
@@ -1072,7 +1095,7 @@ Status GcsFileSystem::GetMatchingPaths(const string& pattern,
         // Find the fixed prefix by looking for the first wildcard.
         const string& fixed_prefix =
             pattern.substr(0, pattern.find_first_of("*?[\\"));
-        const string& dir = io::Dirname(fixed_prefix).ToString();
+        const string& dir = std::string(io::Dirname(fixed_prefix));
         if (dir.empty()) {
           return errors::InvalidArgument(
               "A GCS pattern doesn't have a bucket name: ", pattern);
@@ -1163,13 +1186,13 @@ Status GcsFileSystem::GetChildrenBounded(const string& dirname,
         // 'object_prefix', which is part of 'dirname', should be removed from
         // the beginning of 'name'.
         StringPiece relative_path(name);
-        if (!relative_path.Consume(object_prefix)) {
+        if (!str_util::ConsumePrefix(&relative_path, object_prefix)) {
           return errors::Internal(strings::StrCat(
               "Unexpected response: the returned file name ", name,
               " doesn't match the prefix ", object_prefix));
         }
         if (!relative_path.empty() || include_self_directory_marker) {
-          result->emplace_back(relative_path.ToString());
+          result->emplace_back(std::string(relative_path));
         }
         if (++retrieved_results >= max_results) {
           return Status::OK();
@@ -1192,12 +1215,12 @@ Status GcsFileSystem::GetChildrenBounded(const string& dirname,
         }
         const string& prefix_str = prefix.asString();
         StringPiece relative_path(prefix_str);
-        if (!relative_path.Consume(object_prefix)) {
+        if (!str_util::ConsumePrefix(&relative_path, object_prefix)) {
           return errors::Internal(
               "Unexpected response: the returned folder name ", prefix_str,
               " doesn't match the prefix ", object_prefix);
         }
-        result->emplace_back(relative_path.ToString());
+        result->emplace_back(std::string(relative_path));
         if (++retrieved_results >= max_results) {
           return Status::OK();
         }
@@ -1259,7 +1282,7 @@ Status GcsFileSystem::DeleteFile(const string& fname) {
   request->SetDeleteRequest();
 
   TF_RETURN_WITH_CONTEXT_IF_ERROR(request->Send(), " when deleting ", fname);
-  file_block_cache_->RemoveFile(fname);
+  ClearFileCaches(fname);
   return Status::OK();
 }
 
@@ -1352,9 +1375,9 @@ Status GcsFileSystem::RenameObject(const string& src, const string& target) {
   request->SetResultBuffer(&output_buffer);
   TF_RETURN_WITH_CONTEXT_IF_ERROR(request->Send(), " when renaming ", src,
                                   " to ", target);
-  // Flush the target from the block cache.  The source will be flushed in the
+  // Flush the target from the caches.  The source will be flushed in the
   // DeleteFile call below.
-  file_block_cache_->RemoveFile(target);
+  ClearFileCaches(target);
   Json::Value root;
   TF_RETURN_IF_ERROR(ParseJson(output_buffer, &root));
   bool done;
@@ -1374,8 +1397,7 @@ Status GcsFileSystem::RenameObject(const string& src, const string& target) {
   // on the server side, we can't just retry the whole RenameFile operation
   // because the source object is already gone.
   return RetryingUtils::DeleteWithRetries(
-      std::bind(&GcsFileSystem::DeleteFile, this, src),
-      initial_retry_delay_usec_);
+      [this, &src]() { return DeleteFile(src); }, initial_retry_delay_usec_);
 }
 
 Status GcsFileSystem::IsDirectory(const string& fname) {
@@ -1431,7 +1453,7 @@ Status GcsFileSystem::DeleteRecursively(const string& dirname,
     // and therefore RetryingFileSystem won't pay attention to the failures,
     // we need to make sure these failures are properly retried.
     const auto& delete_file_status = RetryingUtils::DeleteWithRetries(
-        std::bind(&GcsFileSystem::DeleteFile, this, full_path),
+        [this, &full_path]() { return DeleteFile(full_path); },
         initial_retry_delay_usec_);
     if (!delete_file_status.ok()) {
       if (IsDirectory(full_path).ok()) {
@@ -1454,6 +1476,13 @@ void GcsFileSystem::FlushCaches() {
   matching_paths_cache_->Clear();
 }
 
+void GcsFileSystem::SetStats(GcsStatsInterface* stats) {
+  CHECK(stats_ == nullptr) << "SetStats() has already been called.";
+  CHECK(stats != nullptr);
+  stats_ = stats;
+  stats_->Init(this, &throttle_, file_block_cache_.get());
+}
+
 // Creates an HttpRequest and sets several parameters that are common to all
 // requests.  All code (in GcsFileSystem) that creates an HttpRequest should
 // go through this method, rather than directly using http_request_factory_.
@@ -1471,6 +1500,10 @@ Status GcsFileSystem::CreateHttpRequest(std::unique_ptr<HttpRequest>* request) {
   if (additional_header_) {
     new_request->AddHeader(additional_header_->first,
                            additional_header_->second);
+  }
+
+  if (stats_ != nullptr) {
+    new_request->SetRequestStats(stats_->HttpStats());
   }
 
   if (!throttle_.AdmitRequest()) {

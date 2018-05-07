@@ -52,6 +52,34 @@ class WhileUtil {
   static StatusOr<MakeInstructionsLiveInResult> MakeInstructionsLiveIn(
       HloInstruction* while_instr,
       tensorflow::gtl::ArraySlice<HloInstruction*> instructions);
+
+  using LoopStateTy = std::vector<HloInstruction*>;
+  using LoopBodyGeneratorTy = std::function<StatusOr<LoopStateTy>(
+      HloInstruction* /*induction_var*/,
+      const LoopStateTy& /*current_values*/)>;
+
+  // Creates a while loop in `computation` that runs for `trip_count`
+  // iterations.  The structure of the while loop is as follows, in pseudocode:
+  //
+  //  loop_state while_loop() {
+  //    indvar = 0;
+  //    loop_state = init_values
+  //    while (indvar < trip_count) {
+  //      loop_state = loop_body_generator(loop_state)
+  //      indvar++;
+  //    }
+  //    return loop_state;
+  //  }
+  static StatusOr<LoopStateTy> MakeCountedLoop(
+      HloComputation* computation, int32 trip_count,
+      const LoopStateTy& init_values,
+      const LoopBodyGeneratorTy& loop_body_generator);
+
+  // Returns the GetTupleElement instructions in `while_body` that access
+  // elements in the parameter tuple that don't change across iterations.
+  // Assumes `while_body` is the body computation of the while loop in question.
+  static std::vector<HloInstruction*> GetInvariantGTEsForWhileBody(
+      const HloComputation& while_body);
 };
 }  // namespace xla
 

@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_TF2XLA_XLA_COMPILER_H_
 #define TENSORFLOW_COMPILER_TF2XLA_XLA_COMPILER_H_
 
+#include "tensorflow/compiler/tf2xla/host_compute_metadata.pb.h"
 #include "tensorflow/compiler/tf2xla/xla_compilation_device.h"
 #include "tensorflow/compiler/xla/client/local_client.h"
 #include "tensorflow/core/common_runtime/device.h"
@@ -216,13 +217,17 @@ class XlaCompiler {
     // containing both constant and non-constant results.
     std::vector<OutputDescription> outputs;
 
+    // TensorFlow shapes and types of sends/recvs from HostCompute Ops to their
+    // matching RecvAtHost/SendFromHost Ops in the outer graph.
+    tf2xla::HostComputeMetadata host_compute_metadata;
+
     // Resources whose values were updated by the computation, ordered
     // by return value position. Resource updates follow the non-constant
     // results in the outputs of XLA computation.
     std::vector<ResourceUpdate> resource_updates;
 
     // The XLA computation built from the tensorflow subgraph.
-    std::shared_ptr<xla::Computation> computation;
+    std::shared_ptr<xla::XlaComputation> computation;
   };
 
   struct Options {
@@ -276,13 +281,21 @@ class XlaCompiler {
                          const NameAttrList& fn_name_attrs,
                          std::vector<Argument> args, CompilationResult* result);
 
-  // Compiles a tensorflow::Graph into an xla::Computation.
+  // Compiles a tensorflow::Graph into an xla::XlaComputation.
   // Similar to CompileFunction, but takes a Graph as input rather than a
   // function.
   Status CompileGraph(const CompileOptions& options, string const& name,
                       std::unique_ptr<Graph> graph,
                       const std::vector<Argument>& args,
                       CompilationResult* result);
+
+  // Compiles a single Op, given by an OpKernelContext, into an
+  // xla::XlaComputation. Similar to CompileFunction but takes a single Op as
+  // input.
+  Status CompileSingleOp(const CompileOptions& options, string const& name,
+                         OpKernelContext* ctx,
+                         const std::vector<Argument>& args,
+                         CompilationResult* result);
 
   // Returns the shape of the XLA parameter for an argument 'arg'.
   // See the class comment for more details about the argument passing
@@ -295,6 +308,38 @@ class XlaCompiler {
   // computations. Computations that communicate should be compiled with the
   // same XlaCompiler.
   Status GetChannelHandle(const string& key, xla::ChannelHandle* channel);
+
+  // Sets the shapes and types for the device to host transfer associated with
+  // 'key'.
+  Status SetDeviceToHostMetadata(const string& key,
+                                 gtl::ArraySlice<DataType> types,
+                                 gtl::ArraySlice<TensorShape> shapes);
+
+  // Gets the shapes the device to host transfer associated with 'key'.
+  Status GetDeviceToHostShapes(const string& key,
+                               std::vector<TensorShape>* shapes) const;
+
+  // Sets the shapes and types for the host to device transfer associated with
+  // 'key'.
+  Status SetHostToDeviceMetadata(const string& key,
+                                 gtl::ArraySlice<DataType> types,
+                                 gtl::ArraySlice<TensorShape> shapes);
+
+  // In order to avoid deadlocks from dependencies in host computations, it can
+  // be necessary to enforce a partial order on the execution of HostCompute
+  // Ops. In particular it may be necessary to constrain the SendToHost for one
+  // HostCompute to run before blocking on the RecvAtHost for another
+  // HostCompute. The compiler maintains a mapping from 'host_compute_name' to
+  // handle, where the handle is an 'output' of the HostCompute Op corresponding
+  // to 'host_compute_name'. Another HostCompute Op that needs to be sequenced
+  // later can add the handle as an 'input' to enforce the constraints.
+  // 'host_compute_name' can be any string the client wishes to use to identify
+  // a given HostCompute Op as long as the names are unique within the
+  // compilation.
+  Status GetHostComputeControlDependency(const string& host_compute_name,
+                                         xla::XlaOp* handle);
+  Status SetHostComputeControlDependency(const string& host_compute_name,
+                                         const xla::XlaOp& handle);
 
   const Options& options() const { return options_; }
   xla::Client* client() const { return options_.client; }
@@ -312,7 +357,7 @@ class XlaCompiler {
   // `args` are the arguments to the computation.
   Status BuildArguments(const Graph& graph,
                         const std::vector<XlaCompiler::Argument>& args,
-                        bool use_tuple_arg, xla::ComputationBuilder* builder,
+                        bool use_tuple_arg, xla::XlaBuilder* builder,
                         XlaContext* context, std::vector<int>* arg_cores,
                         std::vector<XlaExpression>* arg_expressions,
                         std::vector<int>* input_mapping,
@@ -358,6 +403,11 @@ class XlaCompiler {
       cache_;
 
   std::unordered_map<string, xla::ChannelHandle> channels_;
+
+  std::unordered_map<string, tf2xla::HostTransferMetadata> host_compute_sends_;
+  std::unordered_map<string, tf2xla::HostTransferMetadata> host_compute_recvs_;
+
+  std::unordered_map<string, xla::XlaOp> host_compute_control_output_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(XlaCompiler);
 };
