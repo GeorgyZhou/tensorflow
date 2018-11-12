@@ -38,6 +38,7 @@ bool IsBiasAddGrad(const NodeDef& node);
 bool IsBitcast(const NodeDef& node);
 bool IsCast(const NodeDef& node);
 bool IsCheckNumerics(const NodeDef& node);
+bool IsCollective(const NodeDef& node);
 bool IsComplex(const NodeDef& node);
 bool IsComplexAbs(const NodeDef& node);
 bool IsConj(const NodeDef& node);
@@ -45,18 +46,23 @@ bool IsConjugateTranspose(const NodeDef& node);
 bool IsConcat(const NodeDef& node);
 bool IsConcatOffset(const NodeDef& node);
 bool IsConstant(const NodeDef& node);
+bool IsControlFlow(const NodeDef& node);
 bool IsConv2D(const NodeDef& node);
 bool IsConv2DBackpropFilter(const NodeDef& node);
 bool IsConv2DBackpropInput(const NodeDef& node);
+bool IsConv3D(const NodeDef& node);
 bool IsDepthwiseConv2dNative(const NodeDef& node);
 bool IsDepthwiseConv2dNativeBackpropFilter(const NodeDef& node);
 bool IsDepthwiseConv2dNativeBackpropInput(const NodeDef& node);
 bool IsDequeueOp(const NodeDef& node);
 bool IsDiv(const NodeDef& node);
+bool IsElementWiseMonotonic(const NodeDef& node, bool* is_non_decreasing);
 bool IsEluGrad(const NodeDef& node);
 bool IsEnter(const NodeDef& node);
 bool IsEqual(const NodeDef& node);
 bool IsExit(const NodeDef& node);
+bool IsExp(const NodeDef& node);
+bool IsFakeParam(const NodeDef& node);
 bool IsFill(const NodeDef& node);
 bool IsFloorDiv(const NodeDef& node);
 bool IsFloorMod(const NodeDef& node);
@@ -66,17 +72,20 @@ bool IsGreaterEqual(const NodeDef& node);
 bool IsHistogramSummary(const NodeDef& node);
 bool IsIdentity(const NodeDef& node);
 bool IsIdentityN(const NodeDef& node);
+bool IsIdentityNSingleInput(const NodeDef& node);
 bool IsIgamma(const NodeDef& node);
 bool IsIgammac(const NodeDef& node);
 bool IsImag(const NodeDef& node);
 bool IsInvGrad(const NodeDef& node);
 bool IsLess(const NodeDef& node);
 bool IsLessEqual(const NodeDef& node);
+bool IsLog(const NodeDef& node);
 bool IsLogicalAnd(const NodeDef& node);
 bool IsLogicalNot(const NodeDef& node);
 bool IsLogicalOr(const NodeDef& node);
 bool IsMax(const NodeDef& node);
 bool IsMaximum(const NodeDef& node);
+bool IsMaxPoolGrad(const NodeDef& node);
 bool IsMean(const NodeDef& node);
 bool IsMerge(const NodeDef& node);
 bool IsMin(const NodeDef& node);
@@ -90,6 +99,7 @@ bool IsNextIteration(const NodeDef& node);
 bool IsPack(const NodeDef& node);
 bool IsPad(const NodeDef& node);
 bool IsPack(const NodeDef& node);
+bool IsPartitionedCall(const NodeDef& node);
 bool IsNeg(const NodeDef& node);
 bool IsNoOp(const NodeDef& node);
 bool IsNotEqual(const NodeDef& node);
@@ -137,13 +147,16 @@ bool IsStackOp(const NodeDef& node);
 bool IsStackCloseOp(const NodeDef& node);
 bool IsStackPushOp(const NodeDef& node);
 bool IsStackPopOp(const NodeDef& node);
+bool IsStatefulPartitionedCall(const NodeDef& node);
 bool IsStopGradient(const NodeDef& node);
 bool IsStridedSlice(const NodeDef& node);
 bool IsStridedSliceGrad(const NodeDef& node);
 bool IsSub(const NodeDef& node);
 bool IsSum(const NodeDef& node);
 bool IsSwitch(const NodeDef& node);
+bool IsSymbolicGradient(const NodeDef& node);
 bool IsTanhGrad(const NodeDef& node);
+bool IsTensorArray(const NodeDef& node);
 bool IsTile(const NodeDef& node);
 bool IsTranspose(const NodeDef& node);
 bool IsTruncateDiv(const NodeDef& node);
@@ -165,6 +178,10 @@ bool IsCommutative(const NodeDef& node);
 bool IsPersistent(const NodeDef& node);
 
 bool IsFreeOfSideEffect(const NodeDef& node);
+
+// Returns true if the takes a tensor reference as input, or if looking up its
+// OpDef failed.
+bool MaybeHasRefInput(const NodeDef& node);
 
 bool ModifiesFrameInfo(const NodeDef& node);
 
@@ -196,6 +213,10 @@ bool IsUnaryElementWise(const NodeDef& node);
 
 // Returns true if we can find an opdef corresponding to the op of the node.
 bool HasOpDef(const NodeDef& node);
+
+// Returns true if the op changes the scalar type of its first input elements
+// and preserves the number of elements.
+bool IsCastLike(const NodeDef& node);
 
 }  // end namespace grappler
 }  // end namespace tensorflow

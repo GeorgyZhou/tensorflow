@@ -14,18 +14,20 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/compiler/xla/service/while_loop_invariant_code_motion.h"
+#include "absl/algorithm/container.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
 #include "tensorflow/compiler/xla/service/tuple_util.h"
+#include "tensorflow/compiler/xla/service/while_loop_analysis.h"
 #include "tensorflow/compiler/xla/service/while_util.h"
 #include "tensorflow/compiler/xla/util.h"
-#include "tensorflow/core/lib/gtl/flatmap.h"
-#include "tensorflow/core/lib/gtl/flatset.h"
-#include "tensorflow/core/lib/gtl/inlined_vector.h"
 
 namespace xla {
 
-using tensorflow::gtl::FlatMap;
-using tensorflow::gtl::FlatSet;
-using tensorflow::gtl::InlinedVector;
+using absl::flat_hash_map;
+using absl::flat_hash_set;
+using absl::InlinedVector;
 
 // Copies `to_hoist` to the computation containing `while_instr`, hoisting its
 // operands as needed.  All of its transitive operands are expected to be either
@@ -33,8 +35,8 @@ using tensorflow::gtl::InlinedVector;
 // function hoists the operands in `unhoisted_invariant_instructions` and moves
 // them into `hoisted_instructions`.
 static void CreateLoopInvariantCopy(
-    FlatMap<HloInstruction*, HloInstruction*>* hoisted_instructions,
-    FlatSet<HloInstruction*>* unhoisted_invariant_instructions,
+    flat_hash_map<HloInstruction*, HloInstruction*>* hoisted_instructions,
+    flat_hash_set<HloInstruction*>* unhoisted_invariant_instructions,
     HloInstruction* while_instr, HloInstruction* to_hoist) {
   HloComputation* parent_of_while = while_instr->parent();
   HloComputation* while_body = while_instr->while_body();
@@ -65,8 +67,8 @@ static void CreateLoopInvariantCopy(
       };
 
       InlinedVector<HloInstruction*, 4> new_operands;
-      c_transform(old_instruction->operands(), std::back_inserter(new_operands),
-                  get_new_operand);
+      absl::c_transform(old_instruction->operands(),
+                        std::back_inserter(new_operands), get_new_operand);
 
       HloInstruction* new_instruction =
           parent_of_while->AddInstruction(old_instruction->CloneWithNewOperands(
@@ -98,14 +100,18 @@ static void CreateLoopInvariantCopy(
 // Returns true if `instruction` is worth hoisting only if it lets us hoist some
 // instruction using it.  The rationale is that hoisting these instructions will
 // prevent simplification and fusion in the while body.
-static bool NotWorthHoistingIndividually(const HloInstruction& instruction) {
+bool WhileLoopInvariantCodeMotion::NotWorthHoistingIndividually(
+    const HloInstruction& instruction) {
   switch (instruction.opcode()) {
     default:
       return false;
 
+    case HloOpcode::kConstant:
+      return !hoist_constants_;
+
     case HloOpcode::kBitcast:
     case HloOpcode::kBroadcast:
-    case HloOpcode::kConstant:
+    case HloOpcode::kIota:
     case HloOpcode::kReshape:
     case HloOpcode::kReverse:
     case HloOpcode::kSlice:
@@ -115,7 +121,8 @@ static bool NotWorthHoistingIndividually(const HloInstruction& instruction) {
   }
 }
 
-static StatusOr<bool> TryHoistingInvariantInstructionsFromWhileBody(
+StatusOr<bool>
+WhileLoopInvariantCodeMotion::TryHoistingInvariantInstructionsFromWhileBody(
     HloInstruction* while_instr) {
   auto print_no_metadata = HloPrintOptions{}.set_print_metadata(false);
 
@@ -137,17 +144,23 @@ static StatusOr<bool> TryHoistingInvariantInstructionsFromWhileBody(
   string while_instr_name = while_instr->ToString(print_no_metadata);
   VLOG(2) << "Trying to hoist from " << while_instr_name;
 
+  auto maybe_upper_bound = ComputeWhileLoopTripCountUpperBound(while_instr);
+  if (maybe_upper_bound && *maybe_upper_bound <= 1) {
+    VLOG(2) << "Loop has a trip count of at most 1, skipping.";
+    return false;
+  }
+
   HloComputation* while_body = while_instr->while_body();
 
   // Maps instructions in the while body to instructions hoisted outside the
   // while that compute the same value.
-  FlatMap<HloInstruction*, HloInstruction*> hoisted_instructions;
+  flat_hash_map<HloInstruction*, HloInstruction*> hoisted_instructions;
 
   // Contains instructions that can be legally hoisted, but were deemed to be
   // unprofitable to be hoisted alone by NotWorthHoistingIndividually.  When we
   // hoist an instruction in this set, we move it from
   // unhoisted_invariant_instructions to hoisted_instructions.
-  FlatSet<HloInstruction*> unhoisted_invariant_instructions;
+  flat_hash_set<HloInstruction*> unhoisted_invariant_instructions;
 
   // Invariant GTE's axiomatically satisfy the constraints for
   // unhoisted_invariant_instructions -- they can be legally hoisted, but there
@@ -161,13 +174,24 @@ static StatusOr<bool> TryHoistingInvariantInstructionsFromWhileBody(
     }
   }
 
-  if (unhoisted_invariant_instructions.empty()) {
+  if (unhoisted_invariant_instructions.empty() && !hoist_constants_) {
     // There are no obviously loop invariant elements in the state being
     // threaded through the while loop so give up.  In theory this precondition
     // is too strong -- we could have code that e.g. permutes the elements in
     // the while state but uses a select to pick the same value on every
     // iteration.
+    //
+    // If we were asked to hoist constants, we need to scan the while body for
+    // constants even if we didn't find any loop invariant values in the while
+    // state tuple.
     return false;
+  }
+
+  // LICM in the presence of domain instructions is complex, bail.
+  for (auto* instruction : while_body->MakeInstructionPostOrder()) {
+    if (instruction->opcode() == HloOpcode::kDomain) {
+      return false;
+    }
   }
 
   // instructions_to_replace[i] is hoisted into a loop invariant instruction
@@ -189,7 +213,7 @@ static StatusOr<bool> TryHoistingInvariantInstructionsFromWhileBody(
              op->opcode() == HloOpcode::kConstant;
     };
 
-    if (!c_all_of(instruction->operands(), is_invariant)) {
+    if (!absl::c_all_of(instruction->operands(), is_invariant)) {
       continue;
     }
 
@@ -243,13 +267,16 @@ static StatusOr<bool> TryHoistingInvariantInstructionsFromWhileBody(
 }
 
 StatusOr<bool> WhileLoopInvariantCodeMotion::Run(HloModule* module) {
+  VLOG(2) << "HLO module before WhileLoopConstantSinking:";
+  XLA_VLOG_LINES(2, module->ToString());
+
   bool changed = false;
   std::vector<HloInstruction*> while_instrs;
   for (auto* comp : module->computations()) {
-    c_copy_if(comp->instructions(), std::back_inserter(while_instrs),
-              [](const HloInstruction* instr) {
-                return instr->opcode() == HloOpcode::kWhile;
-              });
+    absl::c_copy_if(comp->instructions(), std::back_inserter(while_instrs),
+                    [](const HloInstruction* instr) {
+                      return instr->opcode() == HloOpcode::kWhile;
+                    });
   }
 
   for (HloInstruction* while_instr : while_instrs) {
@@ -270,6 +297,14 @@ StatusOr<bool> WhileLoopInvariantCodeMotion::Run(HloModule* module) {
         TryHoistingInvariantInstructionsFromWhileBody(while_instr));
     changed |= result;
   }
+
+  if (changed) {
+    VLOG(2) << "HLO module after WhileLoopConstantSinking:";
+    XLA_VLOG_LINES(2, module->ToString());
+  } else {
+    VLOG(2) << "HLO module unchanged after WhileLoopConstantSinking";
+  }
+
   return changed;
 }
 }  // namespace xla
