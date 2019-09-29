@@ -18,7 +18,7 @@ limitations under the License.
 #include <functional>
 #include <memory>
 
-#include "tensorflow/compiler/jit/legacy_flags/mark_for_compilation_pass_flags.h"
+#include "tensorflow/compiler/jit/flags.h"
 #include "tensorflow/compiler/jit/xla_cluster_util.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_context.h"
@@ -71,6 +71,16 @@ XlaOpRegistry::~XlaOpRegistry() = default;
   if (x.allow_resource_types != y.allow_resource_types) {
     LOG(WARNING) << "Registrations of " << x.name
                  << " have incompatible allow_resource_types settings.";
+    return false;
+  }
+  if (x.allow_variant_types != y.allow_variant_types) {
+    LOG(WARNING) << "Registrations of " << x.name
+                 << " have incompatible allow_variant_types settings.";
+    return false;
+  }
+  if (x.allow_string_type != y.allow_string_type) {
+    LOG(WARNING) << "Registrations of " << x.name
+                 << " have incompatible allow_string_type settings.";
     return false;
   }
   if (!x.has_device_whitelist && !y.has_device_whitelist) {
@@ -130,9 +140,9 @@ XlaOpRegistry::~XlaOpRegistry() = default;
   // Lazily register the CPU and GPU JIT devices the first time
   // GetCompilationDevice is called.
   static void* registration_init = [&registry]() {
-    legacy_flags::MarkForCompilationPassFlags* flags =
-        legacy_flags::GetMarkForCompilationPassFlags();
+    MarkForCompilationPassFlags* flags = GetMarkForCompilationPassFlags();
     bool cpu_global_jit = flags->tf_xla_cpu_global_jit;
+    VLOG(2) << "tf_xla_cpu_global_jit = " << cpu_global_jit;
 
     mutex_lock lock(registry.mutex_);
     if (LaunchOpHasKernelForDevice(DeviceType(DEVICE_CPU)).ok()) {
@@ -143,7 +153,6 @@ XlaOpRegistry::~XlaOpRegistry() = default;
           cpu_global_jit
               ? XlaOpRegistry::AutoclusteringPolicy::kIfEnabledGlobally
               : XlaOpRegistry::AutoclusteringPolicy::kIfExplicitlyRequested;
-      registration.compile_resource_ops = false;
     }
     if (LaunchOpHasKernelForDevice(DeviceType(DEVICE_GPU)).ok()) {
       DeviceRegistration& registration =
@@ -151,7 +160,6 @@ XlaOpRegistry::~XlaOpRegistry() = default;
       registration.compilation_device_name = DEVICE_GPU_XLA_JIT;
       registration.autoclustering_policy =
           XlaOpRegistry::AutoclusteringPolicy::kIfEnabledGlobally;
-      registration.compile_resource_ops = false;
     }
     return nullptr;
   }();
@@ -289,6 +297,12 @@ void XlaOpRegistry::RegisterCompilationKernels() {
           }
           if (op_registration->allow_resource_types) {
             allowed_values->add_type(DT_RESOURCE);
+          }
+          if (op_registration->allow_variant_types) {
+            allowed_values->add_type(DT_VARIANT);
+          }
+          if (op_registration->allow_string_type) {
+            allowed_values->add_type(DT_STRING);
           }
           // Don't build KernelDefs that have unsatisfiable type constraints.
           if (allowed_values->type().empty()) {
@@ -486,6 +500,16 @@ XlaOpRegistrationBuilder& XlaOpRegistrationBuilder::AllowResourceTypes() {
   return *this;
 }
 
+XlaOpRegistrationBuilder& XlaOpRegistrationBuilder::AllowVariantTypes() {
+  registration_->allow_variant_types = true;
+  return *this;
+}
+
+XlaOpRegistrationBuilder& XlaOpRegistrationBuilder::AllowStringType() {
+  registration_->allow_string_type = true;
+  return *this;
+}
+
 XlaOpRegistrationBuilder& XlaOpRegistrationBuilder::TypeConstraint(
     absl::string_view attr_name, DataType allowed) {
   std::set<DataType>& types =
@@ -541,6 +565,8 @@ XlaBackendRegistrar::XlaBackendRegistrar(
     XlaOpRegistry::BackendOpFilter op_filter) {
   XlaOpRegistry& registry = XlaOpRegistry::Instance();
   registry.RegisterBackend(string(name), types, op_filter);
+
+  AddSymbolicExecutionDevice(name);
 }
 
 }  // namespace tensorflow

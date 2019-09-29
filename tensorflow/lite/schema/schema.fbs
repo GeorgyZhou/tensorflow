@@ -39,16 +39,45 @@ enum TensorType : byte {
   BOOL = 6,
   INT16 = 7,
   COMPLEX64 = 8,
+  INT8 = 9,
 }
 
-// Parameters for converting a quantized tensor back to float. Given a
-// quantized value q, the corresponding float value f should be:
-//   f = scale * (q - zero_point)
+// Custom quantization parameters for experimenting with new quantization
+// techniques.
+table CustomQuantization {
+  custom:[ubyte] (force_align: 16);
+}
+
+// Represents a specific quantization technique's parameters.
+union QuantizationDetails {
+  CustomQuantization,
+}
+
+// Parameters for converting a quantized tensor back to float.
 table QuantizationParameters {
+  // These four parameters are the asymmetric linear quantization parameters.
+  // Given a quantized value q, the corresponding float value f should be:
+  //   f = scale * (q - zero_point)
+  // For other quantization types, the QuantizationDetails below is used.
   min:[float];  // For importing back into tensorflow.
   max:[float];  // For importing back into tensorflow.
   scale:[float];  // For dequantizing the tensor's values.
   zero_point:[long];
+
+  // If this is not none, the other quantization parameters (i.e. min, max,
+  // scale, zero_point fields above) are ignored and the value of the
+  // QuantizationDetails union should be used.
+  details:QuantizationDetails;
+
+  // Specifies the dimension of the Tensor's shape that the scales and
+  // zero_points correspond to. For example, a tensor t, with dims=[4, 3, 2, 1]
+  // with quantization params:
+  //   scale=[1.0, 2.0, 3.0], zero_point=[1, 2, 3], quantization_dimension=1
+  // will be quantized across the second dimension of t.
+  //   t[:, 0, :, :] will have scale[0]=1.0, zero_point[0]=1
+  //   t[:, 1, :, :] will have scale[1]=2.0, zero_point[0]=2
+  //   t[:, 2, :, :] will have scale[2]=3.0, zero_point[0]=3
+  quantized_dimension:int;
 }
 
 table Tensor {
@@ -82,7 +111,7 @@ enum BuiltinOperator : byte {
   CONCATENATION = 2,
   CONV_2D = 3,
   DEPTHWISE_CONV_2D = 4,
-  // DEPTH_TO_SPACE = 5,
+  DEPTH_TO_SPACE = 5,
   DEQUANTIZE = 6,
   EMBEDDING_LOOKUP = 7,
   FLOOR = 8,
@@ -182,6 +211,30 @@ enum BuiltinOperator : byte {
   FLOOR_MOD = 95,
   RANGE = 96,
   RESIZE_NEAREST_NEIGHBOR = 97,
+  LEAKY_RELU = 98,
+  SQUARED_DIFFERENCE = 99,
+  MIRROR_PAD = 100,
+  ABS = 101,
+  SPLIT_V = 102,
+  UNIQUE = 103,
+  CEIL = 104,
+  REVERSE_V2 = 105,
+  ADD_N = 106,
+  GATHER_ND = 107,
+  COS = 108,
+  WHERE = 109,
+  RANK = 110,
+  ELU = 111,
+  REVERSE_SEQUENCE = 112,
+  MATRIX_DIAG = 113,
+  QUANTIZE = 114,
+  MATRIX_SET_DIAG = 115,
+  ROUND = 116,
+  HARD_SWISH = 117,
+  IF = 118,
+  WHILE = 119,
+  NON_MAX_SUPPRESSION_V4 = 120,
+  NON_MAX_SUPPRESSION_V5 = 121,
 }
 
 // Options for the builtin operators.
@@ -260,6 +313,28 @@ union BuiltinOptions {
   FloorModOptions,
   RangeOptions,
   ResizeNearestNeighborOptions,
+  LeakyReluOptions,
+  SquaredDifferenceOptions,
+  MirrorPadOptions,
+  AbsOptions,
+  SplitVOptions,
+  UniqueOptions,
+  ReverseV2Options,
+  AddNOptions,
+  GatherNdOptions,
+  CosOptions,
+  WhereOptions,
+  RankOptions,
+  ReverseSequenceOptions,
+  MatrixDiagOptions,
+  QuantizeOptions,
+  MatrixSetDiagOptions,
+  HardSwishOptions,
+  IfOptions,
+  WhileOptions,
+  DepthToSpaceOptions,
+  NonMaxSuppressionV4Options,
+  NonMaxSuppressionV5Options
 }
 
 enum Padding : byte { SAME, VALID }
@@ -354,6 +429,11 @@ table FullyConnectedOptions {
 
   // Parameters for FullyConnected version 2 or above.
   weights_format:FullyConnectedOptionsWeightsFormat = DEFAULT;
+
+  // Parameters for FullyConnected version 5 or above.
+  // If set to true, then the number of dimension is preserved. Furthermore,
+  // all but the last dimension of the input and output shapes will be equal.
+  keep_num_dims: bool;
 }
 
 table SoftmaxOptions {
@@ -415,12 +495,19 @@ table UnidirectionalSequenceLSTMOptions {
 }
 
 table BidirectionalSequenceLSTMOptions {
+  // Parameters supported by version 1:
   fused_activation_function:ActivationFunctionType;
   cell_clip: float; // Optional, 0.0 means no clipping
   proj_clip: float; // Optional, 0.0 means no clipping
 
   // If true, store the outputs of both directions into the first output.
   merge_outputs: bool;
+
+  // Parameters supported by version 2:
+  // If true then first dimension is sequence, otherwise batch.
+  // Version 1 implementations assumed time_major to be true, so this default
+  // value should never change.
+  time_major: bool = true;
 }
 
 table ResizeBilinearOptions {
@@ -465,6 +552,10 @@ table SpaceToDepthOptions {
   block_size: int;
 }
 
+table DepthToSpaceOptions {
+  block_size: int;
+}
+
 table SubOptions {
   fused_activation_function:ActivationFunctionType;
 }
@@ -496,6 +587,9 @@ table TransposeOptions {
 table ExpOptions {
 }
 
+table CosOptions {
+}
+
 table ReducerOptions {
   keep_dims: bool;
 }
@@ -505,6 +599,10 @@ table SqueezeOptions {
 }
 
 table SplitOptions {
+  num_splits: int;
+}
+
+table SplitVOptions {
   num_splits: int;
 }
 
@@ -586,6 +684,9 @@ table ShapeOptions {
   out_type : TensorType;
 }
 
+table RankOptions {
+}
+
 table PowOptions {
 }
 
@@ -609,6 +710,13 @@ table LogicalOrOptions {
 
 table OneHotOptions {
   axis:int;
+}
+
+table AbsOptions {
+}
+
+
+table HardSwishOptions {
 }
 
 table LogicalAndOptions {
@@ -638,6 +746,70 @@ table FloorModOptions {
 }
 
 table RangeOptions {
+}
+
+table LeakyReluOptions {
+  alpha:float;
+}
+
+table SquaredDifferenceOptions {
+}
+
+enum MirrorPadMode : byte {
+  // Doesn't include borders.
+  REFLECT = 0,
+  // Includes borders.
+  SYMMETRIC = 1,
+}
+
+table MirrorPadOptions {
+  mode:MirrorPadMode;
+}
+
+table UniqueOptions {
+  idx_out_type:TensorType = INT32;
+}
+
+table ReverseV2Options {
+}
+
+table AddNOptions {
+}
+
+table GatherNdOptions {
+}
+
+table WhereOptions {
+}
+
+table ReverseSequenceOptions {
+  seq_dim:int;
+  batch_dim:int = 0;
+}
+
+table MatrixDiagOptions {
+}
+
+table QuantizeOptions {
+}
+
+table MatrixSetDiagOptions {
+}
+
+table IfOptions {
+  then_subgraph_index:int;
+  else_subgraph_index:int;
+}
+
+table WhileOptions {
+  cond_subgraph_index:int;
+  body_subgraph_index:int;
+}
+
+table NonMaxSuppressionV4Options {
+}
+
+table NonMaxSuppressionV5Options {
 }
 
 // An OperatorCode can be an enum value (BuiltinOperator) if the operator is a
@@ -681,6 +853,15 @@ table Operator {
   // If the list is empty, no variable is mutated in this operator.
   // The list either has the same length as `inputs`, or is empty.
   mutating_variable_inputs:[bool];
+
+  // A list of indices to the subgraph's "tensors" that are internal to an Op.
+  // Internal tensors are those that do not flow in or out of the operation,
+  // but instead are part of internal computation. As such, the operation's
+  // implementation may manage its memory more efficiently. They are needed
+  // however (i.e. not just an implementation detail) since they are part of the
+  // computation, which may require relevant metadata such as quantization
+  // parameters.
+  intermediates:[int];
 }
 
 // The root type, defining a subgraph, which typically represents an entire
@@ -711,6 +892,13 @@ table Buffer {
   data:[ubyte] (force_align: 16);
 }
 
+table Metadata {
+  // A human readable string to uniquely identify a Metadata.
+  name:string;
+  // An index to the buffers table.
+  buffer:uint;
+}
+
 table Model {
   // Version of the schema.
   version:uint;
@@ -733,8 +921,12 @@ table Model {
   // their buffer.
   buffers:[Buffer];
 
-  // Metadata about the model.  Indirects into the existings buffers list.
+  // Metadata about the model. Indirects into the existings buffers list.
+  // Deprecated, prefer to use metadata field.
   metadata_buffer:[int];
+
+  // Metadata about the model.
+  metadata:[Metadata];
 }
 
 root_type Model;

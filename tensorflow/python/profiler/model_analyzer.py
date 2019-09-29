@@ -27,7 +27,7 @@ import six
 from google.protobuf import message
 from tensorflow.core.profiler import tfprof_options_pb2
 from tensorflow.core.profiler import tfprof_output_pb2
-from tensorflow.python import pywrap_tensorflow as print_mdl
+from tensorflow.python import _pywrap_tfprof as print_mdl
 from tensorflow.python.eager import context
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
@@ -122,7 +122,7 @@ def _build_advisor_options(options):
   return opts
 
 
-@tf_export('profiler.Profiler')
+@tf_export(v1=['profiler.Profiler'])
 class Profiler(object):
   """TensorFlow multi-step profiler.
 
@@ -135,9 +135,9 @@ class Profiler(object):
 
     for i in xrange(total_steps):
       if i % 10000 == 0:
-        run_meta = tf.RunMetadata()
+        run_meta = tf.compat.v1.RunMetadata()
         _ = sess.run(...,
-                     options=tf.RunOptions(
+                     options=tf.compat.v1.RunOptions(
                          trace_level=tf.RunOptions.FULL_TRACE),
                      run_metadata=run_meta)
         profiler.add_step(i, run_meta)
@@ -306,7 +306,7 @@ class Profiler(object):
     print_mdl.WriteProfile(filename)
 
 
-@tf_export('profiler.profile')
+@tf_export(v1=['profiler.profile'])
 def profile(graph=None,
             run_meta=None,
             op_log=None,
@@ -381,7 +381,7 @@ def profile(graph=None,
   return tfprof_node
 
 
-@tf_export('profiler.advise')
+@tf_export(v1=['profiler.advise'])
 def advise(graph=None, run_meta=None, options=_DEFAULT_ADVISE_OPTIONS):
   """Auto profile and advise.
 

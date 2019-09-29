@@ -24,6 +24,7 @@ limitations under the License.
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/stream_executor/stream_executor.h"
 
 namespace xla {
@@ -48,6 +49,8 @@ extern const char* const kEigenMatMulF32SymbolName =
     "__xla_cpu_runtime_EigenMatMulF32";
 extern const char* const kEigenMatMulF64SymbolName =
     "__xla_cpu_runtime_EigenMatMulF64";
+extern const char* const kEigenMatMulS32SymbolName =
+    "__xla_cpu_runtime_EigenMatMulS32";
 extern const char* const kMKLConvF32SymbolName = "__xla_cpu_runtime_MKLConvF32";
 extern const char* const kMKLMatMulF32SymbolName =
     "__xla_cpu_runtime_MKLMatMulF32";
@@ -70,6 +73,8 @@ extern const char* const kEigenSingleThreadedMatMulF32SymbolName =
     "__xla_cpu_runtime_EigenSingleThreadedMatMulF32";
 extern const char* const kEigenSingleThreadedMatMulF64SymbolName =
     "__xla_cpu_runtime_EigenSingleThreadedMatMulF64";
+extern const char* const kEigenSingleThreadedMatMulS32SymbolName =
+    "__xla_cpu_runtime_EigenSingleThreadedMatMulS32";
 extern const char* const kEigenSingleThreadedConvF16SymbolName =
     "__xla_cpu_runtime_EigenSingleThreadedConvF16";
 extern const char* const kEigenSingleThreadedConvF32SymbolName =
@@ -84,32 +89,13 @@ extern const char* const kReleaseOutfeedBufferAfterPopulationSymbolName =
     "__xla_cpu_runtime_ReleaseOutfeedBufferAfterPopulation";
 extern const char* const kParallelForkJoinSymbolName =
     "__xla_cpu_runtime_ParallelForkJoin";
-extern const char* const kKeyValueSortPREDSymbolName =
-    "__xla_cpu_runtime_KeyValueSortPRED";
-extern const char* const kKeyValueSortS8SymbolName =
-    "__xla_cpu_runtime_KeyValueSortS8";
-extern const char* const kKeyValueSortU8SymbolName =
-    "__xla_cpu_runtime_KeyValueSortU8";
-extern const char* const kKeyValueSortS16SymbolName =
-    "__xla_cpu_runtime_KeyValueSortS16";
-extern const char* const kKeyValueSortU16SymbolName =
-    "__xla_cpu_runtime_KeyValueSortU16";
-extern const char* const kKeyValueSortF16SymbolName =
-    "__xla_cpu_runtime_KeyValueSortF16";
-extern const char* const kKeyValueSortS32SymbolName =
-    "__xla_cpu_runtime_KeyValueSortS32";
-extern const char* const kKeyValueSortU32SymbolName =
-    "__xla_cpu_runtime_KeyValueSortU32";
-extern const char* const kKeyValueSortF32SymbolName =
-    "__xla_cpu_runtime_KeyValueSortF32";
-extern const char* const kKeyValueSortS64SymbolName =
-    "__xla_cpu_runtime_KeyValueSortS64";
-extern const char* const kKeyValueSortU64SymbolName =
-    "__xla_cpu_runtime_KeyValueSortU64";
-extern const char* const kKeyValueSortF64SymbolName =
-    "__xla_cpu_runtime_KeyValueSortF64";
-
+extern const char* const kKeyValueSortSymbolName =
+    "__xla_cpu_runtime_KeyValueSort";
+extern const char* const kTracingStartSymbolName =
+    "__xla_cpu_runtime_TracingStart";
+extern const char* const kTracingEndSymbolName = "__xla_cpu_runtime_TracingEnd";
 extern const char* const kXlaCpuRuntimeSymbolNamePrefix = "__xla_cpu_runtime_";
+
 }  // namespace runtime
 }  // namespace cpu
 }  // namespace xla
@@ -126,6 +112,24 @@ tensorflow::string ShapeString(const void* shape_ptr, xla::int32 shape_length) {
 }
 
 }  // namespace
+
+extern "C" {
+
+TF_ATTRIBUTE_NO_SANITIZE_MEMORY xla::int64 __xla_cpu_runtime_TracingStart(
+    const void* /* xla::ExecutableRunOptions* */ run_options_ptr,
+    const char* name) {
+  VLOG(3) << "TracingStart " << name;
+  return tensorflow::profiler::TraceMe::ActivityStart(name);
+}
+
+TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_TracingEnd(
+    const void* /* xla::ExecutableRunOptions* */ run_options_ptr,
+    xla::int64 id) {
+  VLOG(3) << "TracingEnd " << id;
+  tensorflow::profiler::TraceMe::ActivityEnd(id);
+}
+
+}  // extern "C"
 
 TF_ATTRIBUTE_NO_SANITIZE_MEMORY void*
 __xla_cpu_runtime_AcquireInfeedBufferForDequeue(

@@ -65,21 +65,30 @@ class SingleThreadedExecutorImpl : public Executor {
         if (IsRefType(dt)) {
           return errors::Unimplemented(
               "Single-threaded executor does not support reference-typed "
-              "edges.");
+              "edges.  But saw type ",
+              DataTypeString(dt), " in outputs of node ", n->name());
         }
       }
 
       if (n->IsControlFlow()) {
-        return errors::Unimplemented(
-            "Single-threaded executor does not support control flow.");
+        return errors::FailedPrecondition(
+            "Single-threaded executor does not support low level control flow, "
+            " but saw control flow node ",
+            n->name(),
+            ".  Perhaps your graph contains old-style control flow primitives? "
+            "Try using tf.compat.v1.enable_control_flow_v2().");
       }
       if (n->IsSend() || n->IsHostSend() || n->IsRecv() || n->IsHostRecv()) {
         return errors::Unimplemented(
-            "Single-threaded executor does not support partitioned graphs.");
+            "Single-threaded executor does not support partitioned graphs.  "
+            "But saw send/recv node ",
+            n->name());
       }
       if (n->IsCollective()) {
         return errors::Unimplemented(
-            "Single-threaded executor does not support collective ops.");
+            "Single-threaded executor does not support collective ops.  But "
+            "saw collective node ",
+            n->name());
       }
 
       KernelState& kernel_state = kernels_[i];
@@ -200,6 +209,7 @@ class SingleThreadedExecutorImpl : public Executor {
     params.log_memory = false;              // TODO(mrry): Too severe?
     params.record_tensor_accesses = false;  // TODO(mrry): Too severe?
     params.rendezvous = args.rendezvous;
+    params.create_rendezvous = &(params_.rendezvous_factory);
     params.session_state = args.session_state;
     params.tensor_store = args.tensor_store;
     params.cancellation_manager = args.cancellation_manager;
@@ -369,8 +379,8 @@ static SingleThreadedExecutorRegistrar registrar;
 Status NewSingleThreadedExecutor(const LocalExecutorParams& params,
                                  std::unique_ptr<const Graph> graph,
                                  Executor** executor) {
-  std::unique_ptr<SingleThreadedExecutorImpl> impl(
-      new SingleThreadedExecutorImpl(params));
+  std::unique_ptr<SingleThreadedExecutorImpl> impl =
+      absl::make_unique<SingleThreadedExecutorImpl>(params);
   TF_RETURN_IF_ERROR(impl->Initialize(*graph));
   *executor = impl.release();
   return Status::OK();

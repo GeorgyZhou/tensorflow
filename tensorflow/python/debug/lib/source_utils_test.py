@@ -54,8 +54,12 @@ class GuessIsTensorFlowLibraryTest(test_util.TensorFlowTestCase):
     ops.reset_default_graph()
 
   def testGuessedBaseDirIsProbablyCorrect(self):
-    self.assertEqual("tensorflow",
-                     os.path.basename(source_utils._TENSORFLOW_BASEDIR))
+    # In the non-pip world, code resides in "tensorflow/"
+    # In the pip world, after virtual pip, code resides in "tensorflow_core/"
+    # So, we have to check both of them
+    self.assertIn(
+        os.path.basename(source_utils._TENSORFLOW_BASEDIR),
+        ["tensorflow", "tensorflow_core"])
 
   def testUnitTestFileReturnsFalse(self):
     self.assertFalse(
@@ -65,10 +69,25 @@ class GuessIsTensorFlowLibraryTest(test_util.TensorFlowTestCase):
     self.assertTrue(
         source_utils.guess_is_tensorflow_py_library(source_utils.__file__))
 
+  @test_util.run_deprecated_v1
   def testFileInPythonKernelsPathReturnsTrue(self):
     x = constant_op.constant(42.0, name="x")
     self.assertTrue(
         source_utils.guess_is_tensorflow_py_library(x.op.traceback[-1][0]))
+
+  def testDebuggerExampleFilePathReturnsFalse(self):
+    self.assertFalse(
+        source_utils.guess_is_tensorflow_py_library(os.path.normpath(
+            "site-packages/tensorflow/python/debug/examples/debug_mnist.py")))
+    self.assertFalse(
+        source_utils.guess_is_tensorflow_py_library(os.path.normpath(
+            "site-packages/tensorflow/python/debug/examples/v1/example_v1.py")))
+    self.assertFalse(
+        source_utils.guess_is_tensorflow_py_library(os.path.normpath(
+            "site-packages/tensorflow/python/debug/examples/v2/example_v2.py")))
+    self.assertFalse(
+        source_utils.guess_is_tensorflow_py_library(os.path.normpath(
+            "site-packages/tensorflow/python/debug/examples/v3/example_v3.py")))
 
   def testNonPythonFileRaisesException(self):
     with self.assertRaisesRegexp(ValueError, r"is not a Python source file"):
@@ -109,8 +128,8 @@ class SourceHelperTest(test_util.TensorFlowTestCase):
       self.w = math_ops.matmul(self.u, self.v, name="w")
       self.w_line_number = line_number_above()
 
-      sess.run(self.u.initializer)
-      sess.run(self.v.initializer)
+      self.evaluate(self.u.initializer)
+      self.evaluate(self.v.initializer)
 
       run_options = config_pb2.RunOptions(output_partition_graphs=True)
       debug_utils.watch_graph(
@@ -215,6 +234,7 @@ class SourceHelperTest(test_util.TensorFlowTestCase):
     os.remove(unrelated_source_path)
 
 
+@test_util.run_v1_only("b/120545219")
 class ListSourceAgainstDumpTest(test_util.TensorFlowTestCase):
 
   def createAndRunGraphWithWhileLoop(self):

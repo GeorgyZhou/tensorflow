@@ -18,7 +18,7 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/lib/numeric.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/primitive_util.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -107,6 +107,24 @@ class RangeOp : public XlaOpKernel {
                                          DataTypeString(type));
     }
     OP_REQUIRES_OK(ctx, output.status());
+
+    if (type == DT_INT32 || type == DT_INT64) {
+      // If input has dynamic dimension (value is -1), propagate the dynamic
+      // dimension to output using set-dimension-size.
+      ctx->set_dynamic_dimension_is_minus_one(true);
+      OP_REQUIRES_OK(ctx, ctx->ConstantInput(1, &limit));
+      if (type == DT_INT32) {
+        if (limit.Get<int32>({}) == -1) {
+          output = xla::SetDimensionSize(output.ValueOrDie(), ctx->Input(1), 0);
+        }
+      } else {
+        if (limit.Get<int64>({}) == -1) {
+          output = xla::SetDimensionSize(
+              output.ValueOrDie(),
+              xla::ConvertElementType(ctx->Input(1), xla::S32), 0);
+        }
+      }
+    }
     ctx->SetOutput(0, output.ValueOrDie());
   }
 };
@@ -157,9 +175,11 @@ class LinSpaceOp : public XlaOpKernel {
           flat(0) = start;
         } else {
           const float step = (stop - start) / (num - 1);
-          for (int64 i = 0; i < num; ++i) {
+          for (int64 i = 0; i < num - 1; ++i) {
             flat(i) = start + step * i;
           }
+          // The last value in the sequence must be equal to stop.
+          flat(num - 1) = stop;
         }
         break;
       }
@@ -171,9 +191,11 @@ class LinSpaceOp : public XlaOpKernel {
           flat(0) = start;
         } else {
           const double step = (stop - start) / (num - 1);
-          for (int64 i = 0; i < num; ++i) {
+          for (int64 i = 0; i < num - 1; ++i) {
             flat(i) = start + step * i;
           }
+          // The last value in the sequence must be equal to stop.
+          flat(num - 1) = stop;
         }
         break;
       }

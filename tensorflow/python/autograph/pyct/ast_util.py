@@ -200,7 +200,8 @@ def matches(node, pattern):
     bool
   """
   if isinstance(pattern, str):
-    pattern = parser.parse_expression(pattern)
+    pattern = parser.parse_str(pattern)
+
   matcher = PatternMatcher(pattern)
   matcher.visit(node)
   return matcher.matches
@@ -282,12 +283,20 @@ def parallel_walk(node, other):
     n = node_stack.pop()
     o = other_stack.pop()
 
-    if (not isinstance(n, (ast.AST, gast.AST)) or
-        not isinstance(o, (ast.AST, gast.AST)) or
+    if ((not isinstance(n, (ast.AST, gast.AST, str)) and n is not None) or
+        (not isinstance(o, (ast.AST, gast.AST, str)) and n is not None) or
         n.__class__.__name__ != o.__class__.__name__):
-      raise ValueError('inconsistent nodes: {} and {}'.format(n, o))
+      raise ValueError('inconsistent nodes: {} ({}) and {} ({})'.format(
+          n, n.__class__.__name__, o, o.__class__.__name__))
 
     yield n, o
+
+    if isinstance(n, str):
+      assert isinstance(o, str), 'The check above should have ensured this'
+      continue
+    if n is None:
+      assert o is None, 'The check above should have ensured this'
+      continue
 
     for f in n._fields:
       n_child = getattr(n, f, None)
@@ -314,38 +323,52 @@ def parallel_walk(node, other):
                 f, n_child, o_child))
 
 
-class LambdaMatcher(gast.NodeVisitor):
-  """Finds nodes that match a given lambda function's signature."""
+class LambdaDefinitionMatcher(gast.NodeVisitor):
+  """Finds lambda nodes that match a given lambda's signature."""
 
-  def __init__(self, lambda_fn):
-    self.lambda_fn = lambda_fn
+  def __init__(self, fn):
+    self.fn = fn
     self.matching_nodes = []
+
+  def _arg_name(self, node):
+    if node is None:
+      return None
+    if isinstance(node, gast.Name):
+      return node.id
+    assert isinstance(node, str)
+    return node
+
+  def _argspec_matches(self, node):
+    arg_spec = tf_inspect.getfullargspec(self.fn)
+
+    node_args = tuple(self._arg_name(arg) for arg in node.args.args)
+    if node_args != tuple(arg_spec.args):
+      return False
+
+    if arg_spec.varargs != self._arg_name(node.args.vararg):
+      return False
+
+    if arg_spec.varkw != self._arg_name(node.args.kwarg):
+      return False
+
+    node_kwonlyargs = tuple(self._arg_name(arg) for arg in node.args.kwonlyargs)
+    if node_kwonlyargs != tuple(arg_spec.kwonlyargs):
+      return False
+
+    return True
 
   def visit_Lambda(self, node):
     self.generic_visit(node)
 
-    arg_spec = tf_inspect.getfullargspec(self.lambda_fn)
-
-    node_args = tuple(arg.id for arg in node.args.args)
-    if node_args != tuple(arg_spec.args):
+    if self.fn.__name__ != '<lambda>':
       return
-
-    node_varargs = None if node.args.vararg is None else node.args.vararg.arg
-    if arg_spec.varargs != node_varargs:
-      return
-
-    node_varkw = None if node.args.kwarg is None else node.args.kwarg.arg
-    if arg_spec.varkw != node_varkw:
-      return
-
-    node_kwonlyargs = tuple(arg.id for arg in node.args.kwonlyargs)
-    if node_kwonlyargs != tuple(arg_spec.kwonlyargs):
+    if not self._argspec_matches(node):
       return
 
     self.matching_nodes.append(node)
 
 
-def find_matching_lambda_definitions(node, f):
-  matcher = LambdaMatcher(f)
+def find_matching_definitions(node, f):
+  matcher = LambdaDefinitionMatcher(f)
   matcher.visit(node)
   return tuple(matcher.matching_nodes)

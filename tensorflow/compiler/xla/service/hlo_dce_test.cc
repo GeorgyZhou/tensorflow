@@ -20,8 +20,10 @@ limitations under the License.
 #include "absl/memory/memory.h"
 #include "tensorflow/compiler/xla/layout_util.h"
 #include "tensorflow/compiler/xla/literal_util.h"
+#include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
+#include "tensorflow/compiler/xla/service/hlo_instructions.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
 #include "tensorflow/compiler/xla/service/hlo_opcode.h"
 #include "tensorflow/compiler/xla/shape_util.h"
@@ -43,9 +45,7 @@ class HloDceTest : public HloTestBase {
   // Returns whether the given instruction exists in the given computation.
   bool HasInstruction(const HloComputation& computation,
                       const HloInstruction* instruction) {
-    return std::find(computation.instructions().begin(),
-                     computation.instructions().end(),
-                     instruction) != computation.instructions().end();
+    return absl::c_linear_search(computation.instructions(), instruction);
   }
 };
 
@@ -59,7 +59,7 @@ TEST_F(HloDceTest, NoDeadCode) {
   builder.AddInstruction(HloInstruction::CreateBinary(
       constant1->shape(), HloOpcode::kAdd, constant1, constant2));
 
-  auto module = CreateNewUnverifiedModule();
+  auto module = CreateNewVerifiedModule();
   auto computation = module->AddEntryComputation(builder.Build());
 
   EXPECT_EQ(3, computation->instruction_count());
@@ -91,6 +91,41 @@ TEST_F(HloDceTest, InstructionsWithSideEffect) {
   EXPECT_EQ(4, computation->instruction_count());
 }
 
+TEST_F(HloDceTest, CustomCallInstructionsWithSideEffect) {
+  // Verify that custom call instruction with side-effect is not removed.
+  auto builder = HloComputation::Builder(TestName());
+  auto instr = Cast<HloCustomCallInstruction>(builder.AddInstruction(
+      HloInstruction::CreateCustomCall(ShapeUtil::MakeShape(F32, {}),
+                                       /*operands=*/{},
+                                       /*custom_call_target=*/"foo")));
+  instr->set_custom_call_has_side_effect(true);
+  builder.AddInstruction(HloInstruction::CreateTuple({}));
+
+  auto module = CreateNewVerifiedModule();
+  module->AddEntryComputation(builder.Build());
+
+  HloDCE dce;
+  TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&dce, module.get()));
+  EXPECT_FALSE(result);
+}
+
+TEST_F(HloDceTest, CustomCallInstructionsWithoutSideEffect) {
+  // Verify that custom call instruction without side-effect is removed.
+  auto builder = HloComputation::Builder(TestName());
+  builder.AddInstruction(
+      HloInstruction::CreateCustomCall(ShapeUtil::MakeShape(F32, {}),
+                                       /*operands=*/{},
+                                       /*custom_call_target=*/"foo"));
+  builder.AddInstruction(HloInstruction::CreateTuple({}));
+
+  auto module = CreateNewVerifiedModule();
+  module->AddEntryComputation(builder.Build());
+
+  HloDCE dce;
+  TF_ASSERT_OK_AND_ASSIGN(bool result, RunHloPass(&dce, module.get()));
+  EXPECT_TRUE(result);
+}
+
 TEST_F(HloDceTest, DeadParameters) {
   // Verify that dead parameters are not removed, but use of the dead parameters
   // are.
@@ -110,7 +145,7 @@ TEST_F(HloDceTest, DeadParameters) {
   builder.AddInstruction(HloInstruction::CreateUnary(
       live_param->shape(), HloOpcode::kNegate, live_param));
 
-  auto module = CreateNewUnverifiedModule();
+  auto module = CreateNewVerifiedModule();
   auto computation = module->AddEntryComputation(builder.Build());
 
   EXPECT_EQ(5, computation->instruction_count());
@@ -150,7 +185,7 @@ TEST_F(HloDceTest, ControlDependencies) {
   builder.AddInstruction(HloInstruction::CreateBinary(
       constant1->shape(), HloOpcode::kAdd, constant1, constant2));
 
-  auto module = CreateNewUnverifiedModule();
+  auto module = CreateNewVerifiedModule();
   auto computation = module->AddEntryComputation(builder.Build());
 
   // Add a control dependency between two instructions.
@@ -175,7 +210,7 @@ TEST_F(HloDceTest, ControlDependencies) {
 
 // Tests that a dead call instruction is removed.
 TEST_F(HloDceTest, DeadInstructionWithCalledComputation) {
-  auto module = CreateNewUnverifiedModule();
+  auto module = CreateNewVerifiedModule();
   Shape shape = ShapeUtil::MakeShape(F32, {});
 
   // Called computation for the call instruction.
@@ -225,8 +260,9 @@ TEST_F(HloDceTest, CalledComputationWithSideEffect) {
         HloInstruction::CreateParameter(0, shape, "cond_param"));
     auto constant = cond_builder.AddInstruction(
         HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(42.0f)));
-    cond_builder.AddInstruction(HloInstruction::CreateBinary(
-        ShapeUtil::MakeShape(PRED, {}), HloOpcode::kLt, param, constant));
+    cond_builder.AddInstruction(
+        HloInstruction::CreateCompare(ShapeUtil::MakeShape(PRED, {}), param,
+                                      constant, ComparisonDirection::kLt));
   }
   auto cond_computation = module->AddEmbeddedComputation(cond_builder.Build());
 
@@ -323,7 +359,7 @@ TEST_F(HloDceTest, CalledComputationWithNestedSideEffect) {
 }
 
 TEST_F(HloDceTest, RemoveDeadSubcomputation) {
-  auto module = CreateNewUnverifiedModule();
+  auto module = CreateNewVerifiedModule();
   HloComputation::Builder builder(TestName());
 
   HloComputation::Builder subcomp_builder("reduction_subcomp");

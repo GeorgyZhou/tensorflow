@@ -39,6 +39,7 @@ limitations under the License.
 
 #include "tensorflow/lite/c/builtin_op_data.h"
 #include "tensorflow/lite/c/c_api_internal.h"
+#include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
 #include "tensorflow/lite/kernels/op_macros.h"
 
@@ -69,9 +70,9 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   return context->ResizeTensor(context, output, outputSize);
 }
 
-TfLiteStatus EvalFloat(TfLiteContext* context, TfLiteNode* node,
-                       const TfLiteTensor* lookup, const TfLiteTensor* value,
-                       TfLiteTensor* output) {
+TfLiteStatus EvalSimple(TfLiteContext* context, TfLiteNode* node,
+                        const TfLiteTensor* lookup, const TfLiteTensor* value,
+                        TfLiteTensor* output) {
   const int row_size = SizeOfDimension(value, 0);
   const int row_bytes = value->bytes / row_size;
 
@@ -104,6 +105,14 @@ TfLiteStatus EvalHybrid(TfLiteContext* context, TfLiteNode* node,
     col_size *= SizeOfDimension(value, i);
   }
 
+  float* output_ptr = GetTensorData<float>(output);
+  const int8_t* value_ptr;
+  if (value->type == kTfLiteUInt8) {
+    value_ptr = reinterpret_cast<int8_t*>(value->data.uint8);
+  } else {
+    value_ptr = value->data.int8;
+  }
+
   for (int i = 0; i < SizeOfDimension(lookup, 0); i++) {
     int idx = lookup->data.i32[i];
     if (idx >= row_size || idx < 0) {
@@ -117,8 +126,7 @@ TfLiteStatus EvalHybrid(TfLiteContext* context, TfLiteNode* node,
       // TODO(alanchiao): refactor scalar multiply into separate function
       // for ease of adding a neon equivalent if ever necessary.
       for (int j = 0; j < col_size; j++) {
-        const int8_t* value_ptr = reinterpret_cast<int8_t*>(value->data.uint8);
-        output->data.f[j + i * col_size] =
+        output_ptr[j + i * col_size] =
             value_ptr[j + idx * col_size] * scaling_factor;
       }
     }
@@ -133,9 +141,14 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
   TfLiteTensor* output = GetOutput(context, node, 0);
   switch (value->type) {
     case kTfLiteFloat32:
-      return EvalFloat(context, node, lookup, value, output);
+      return EvalSimple(context, node, lookup, value, output);
     case kTfLiteUInt8:
-      return EvalHybrid(context, node, lookup, value, output);
+    case kTfLiteInt8:
+      if (output->type == kTfLiteFloat32) {
+        return EvalHybrid(context, node, lookup, value, output);
+      } else {
+        return EvalSimple(context, node, lookup, value, output);
+      }
     default:
       context->ReportError(context, "Type not currently supported.");
       return kTfLiteError;
