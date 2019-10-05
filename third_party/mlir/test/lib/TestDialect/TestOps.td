@@ -21,6 +21,7 @@
 
 include "mlir/IR/OpBase.td"
 include "mlir/Analysis/CallInterfaces.td"
+include "mlir/Analysis/InferTypeOpInterface.td"
 
 def TEST_Dialect : Dialect {
   let name = "test";
@@ -193,6 +194,26 @@ def SizedRegionOp : TEST_Op<"sized_region_op", []> {
   let regions = (region SizedRegion<2>:$my_region, SizedRegion<1>);
 }
 
+//===----------------------------------------------------------------------===//
+// Test Call Interfaces
+//===----------------------------------------------------------------------===//
+
+def ConversionCallOp : TEST_Op<"conversion_call_op",
+    [CallOpInterface]> {
+  let arguments = (ins Variadic<AnyType>:$inputs, SymbolRefAttr:$callee);
+  let results = (outs Variadic<AnyType>);
+
+  let extraClassDeclaration = [{
+    /// Get the argument operands to the called function.
+    operand_range getArgOperands() { return inputs(); }
+
+    /// Return the callee of this operation.
+    CallInterfaceCallable getCallableForCallee() {
+      return getAttrOfType<SymbolRefAttr>("callee");
+    }
+  }];
+}
+
 def FunctionalRegionOp : TEST_Op<"functional_region_op",
     [CallableOpInterface]> {
   let regions = (region AnyRegion:$body);
@@ -202,6 +223,9 @@ def FunctionalRegionOp : TEST_Op<"functional_region_op",
     Region *getCallableRegion(CallInterfaceCallable) { return &body(); }
     void getCallableRegions(SmallVectorImpl<Region *> &callables) {
       callables.push_back(&body());
+    }
+    ArrayRef<Type> getCallableResults(Region *) {
+      return getType().cast<FunctionType>().getResults();
     }
   }];
 }
@@ -218,19 +242,19 @@ def SameOperandElementTypeOp : TEST_Op<"same_operand_type",
 
 def SameOperandAndResultElementTypeOp : TEST_Op<"same_operand_and_result_type",
     [SameOperandsAndResultElementType]> {
-  let arguments = (ins AnyVectorOrTensor:$x, AnyVectorOrTensor:$y);
-  let results = (outs AnyVectorOrTensor:$res);
+  let arguments = (ins Variadic<AnyVectorOrTensor>:$args);
+  let results = (outs Variadic<AnyVectorOrTensor>:$res);
 }
 
 def SameOperandShapeOp : TEST_Op<"same_operand_shape", [SameOperandsShape]> {
-  let arguments = (ins AnyVectorOrTensor:$x, AnyVectorOrTensor:$y);
+  let arguments = (ins Variadic<AnyVectorOrTensor>:$args);
   let results = (outs AnyVectorOrTensor:$res);
 }
 
 def SameOperandAndResultShapeOp : TEST_Op<"same_operand_and_result_shape",
     [SameOperandsAndResultShape]> {
-  let arguments = (ins AnyVectorOrTensor:$x, AnyVectorOrTensor:$y);
-  let results = (outs AnyVectorOrTensor:$res);
+  let arguments = (ins Variadic<AnyVectorOrTensor>:$args);
+  let results = (outs Variadic<AnyVectorOrTensor>:$res);
 }
 
 def ArgAndResHaveFixedElementTypesOp :
@@ -318,8 +342,7 @@ def ParentOp : TEST_Op<"parent">;
 def ChildOp : TEST_Op<"child", [HasParent<"ParentOp">]>;
 
 
-def TerminatorOp : TEST_Op<"finish", [Terminator]> {
-}
+def TerminatorOp : TEST_Op<"finish", [Terminator]>;
 def SingleBlockImplicitTerminatorOp : TEST_Op<"SingleBlockImplicitTerminator",
     [SingleBlockImplicitTerminator<"TerminatorOp">]> {
   let regions = (region SizedRegion<1>:$region);
@@ -327,6 +350,12 @@ def SingleBlockImplicitTerminatorOp : TEST_Op<"SingleBlockImplicitTerminator",
 
 def I32ElementsAttrOp : TEST_Op<"i32ElementsAttr"> {
   let arguments = (ins I32ElementsAttr:$attr);
+}
+
+def OpWithInferTypeInterfaceOp : TEST_Op<"op_with_infer_type_if",
+    [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins AnyTensor:$x, AnyTensor:$y);
+  let results = (outs AnyTensor:$res);
 }
 
 def IsNotScalar : Constraint<CPred<"$0.getType().getRank() != 0">>;

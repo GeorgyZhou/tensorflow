@@ -323,20 +323,19 @@ static port::Status InternalInit() {
       absl::StrCat("failed call to hipDeviceGet: ", ToString(res))};
 }
 
-/* static */ bool GpuDriver::GetDeviceName(hipDevice_t device,
-                                           string* device_name) {
+/* static */ port::Status GpuDriver::GetDeviceName(hipDevice_t device,
+                                                   string* device_name) {
   static const size_t kCharLimit = 64;
   absl::InlinedVector<char, 4> chars(kCharLimit);
   hipError_t res =
       tensorflow::wrap::hipDeviceGetName(chars.begin(), kCharLimit - 1, device);
   if (res != hipSuccess) {
-    LOG(ERROR) << "failed to get device name for " << device << ": "
-               << ToString(res);
-    return false;
+    return port::InternalError(
+        absl::StrCat("Failed to get device name: ", ToString(res)));
   }
   chars[kCharLimit - 1] = '\0';
   *device_name = chars.begin();
-  return true;
+  return port::Status::OK();
 }
 
 bool DeviceOptionsToContextFlags(const DeviceOptions& device_options,
@@ -359,30 +358,22 @@ bool DeviceOptionsToContextFlags(const DeviceOptions& device_options,
   delete context;
 }
 
-/* static */ bool GpuDriver::FuncGetAttribute(hipDeviceAttribute_t attribute,
-                                              hipFunction_t func,
-                                              int* attribute_value) {
+/* static */ port::Status GpuDriver::FuncGetAttribute(
+    hipDeviceAttribute_t attribute, hipFunction_t func, int* attribute_value) {
   // TODO(ROCm) properly implement this feature in HIP
-  hipError_t res = hipSuccess;
-  if (res != hipSuccess) {
-    LOG(ERROR) << "failed to query kernel attribute. kernel: " << func
-               << ", attribute: " << attribute;
-    return false;
-  }
-  return true;
+  return port::Status::OK();
 }
 
-/* static */ bool GpuDriver::FuncSetCacheConfig(hipFunction_t function,
-                                                hipFuncCache_t cache_config) {
+/* static */ port::Status GpuDriver::FuncSetCacheConfig(
+    hipFunction_t function, hipFuncCache_t cache_config) {
   hipError_t res =
       tensorflow::wrap::hipFuncSetCacheConfig(function, cache_config);
   if (res != hipSuccess) {
-    LOG(ERROR) << "failed to set ROCM kernel cache config. kernel: " << function
-               << ", config: " << cache_config << ", result: " << ToString(res);
-    return false;
+    return port::InternalError(absl::StrCat(
+        "failed to set ROCM kernel cache config: ", ToString(res)));
   }
 
-  return true;
+  return port::Status::OK();
 }
 
 /* static */ port::StatusOr<hipSharedMemConfig>
@@ -455,57 +446,54 @@ GpuDriver::ContextGetSharedMemConfig(GpuContext* context) {
                       "Feature not supported on ROCm platform (LoadCubin)"};
 }
 
-/* static */ bool GpuDriver::LoadHsaco(GpuContext* context,
-                                       const char* hsaco_contents,
-                                       hipModule_t* module) {
+/* static */ port::Status GpuDriver::LoadHsaco(GpuContext* context,
+                                               const char* hsaco_contents,
+                                               hipModule_t* module) {
   absl::Notification notification;
-  bool ret = true;
-  GetDriverExecutor()->Schedule(
-      [context, hsaco_contents, module, &ret, &notification]() {
-        ScopedActivateContext activation{context};
-        void* hsaco_data = const_cast<char*>(hsaco_contents);
+  port::Status ret = port::Status::OK();
+  GetDriverExecutor()->Schedule([context, hsaco_contents, module, &ret,
+                                 &notification]() {
+    ScopedActivateContext activation{context};
+    void* hsaco_data = const_cast<char*>(hsaco_contents);
 
-        hipError_t res =
-            tensorflow::wrap::hipModuleLoadData(module, hsaco_data);
+    hipError_t res = tensorflow::wrap::hipModuleLoadData(module, hsaco_data);
 
-        if (res != hipSuccess) {
-          LOG(ERROR) << "failed to load HSACO: " << ToString(res);
-          ret = false;
-          notification.Notify();
-        }
+    if (res != hipSuccess) {
+      ret = port::InternalError(
+          absl::StrCat("Failed to load HSACO: ", ToString(res)));
+      notification.Notify();
+    }
 
-        CHECK(module != nullptr);
-        notification.Notify();
-      });
+    CHECK(module != nullptr);
+    notification.Notify();
+  });
   notification.WaitForNotification();
 
   return ret;
 }
 
-/* static */ bool GpuDriver::SynchronousMemsetUint8(GpuContext* context,
-                                                    hipDeviceptr_t location,
-                                                    uint8 value, size_t size) {
+/* static */ port::Status GpuDriver::SynchronousMemsetUint8(
+    GpuContext* context, hipDeviceptr_t location, uint8 value, size_t size) {
   ScopedActivateContext activation{context};
   hipError_t res = tensorflow::wrap::hipMemsetD8(location, value, size);
   if (res != hipSuccess) {
-    LOG(ERROR) << "failed to memset memory: " << ToString(res);
-    return false;
+    return port::InternalError(
+        absl::StrCat("failed to memset memory: ", ToString(res)));
   }
-  return true;
+  return port::Status::OK();
 }
 
-/* static */ bool GpuDriver::SynchronousMemsetUint32(GpuContext* context,
-                                                     hipDeviceptr_t location,
-                                                     uint32 value,
-                                                     size_t uint32_count) {
+/* static */ port::Status GpuDriver::SynchronousMemsetUint32(
+    GpuContext* context, hipDeviceptr_t location, uint32 value,
+    size_t uint32_count) {
   ScopedActivateContext activation{context};
   void* pointer = absl::bit_cast<void*>(location);
   hipError_t res = tensorflow::wrap::hipMemsetD32(pointer, value, uint32_count);
   if (res != hipSuccess) {
-    LOG(ERROR) << "failed to memset memory: " << ToString(res);
-    return false;
+    return port::InternalError(
+        absl::StrCat("failed to memset memory: ", ToString(res)));
   }
-  return true;
+  return port::Status::OK();
 }
 
 /* static */ bool GpuDriver::AsynchronousMemsetUint8(GpuContext* context,
