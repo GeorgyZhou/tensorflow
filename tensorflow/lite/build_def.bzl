@@ -7,18 +7,16 @@ load(
     "tf_cc_shared_object",
     "tf_cc_test",
 )
+load("//tensorflow/lite/java:aar_with_jni.bzl", "aar_with_jni")
+load("@build_bazel_rules_android//android:rules.bzl", "android_library")
 
 def tflite_copts():
     """Defines compile time flags."""
     copts = [
         "-DFARMHASH_NO_CXX_STRING",
     ] + select({
-        clean_dep("//tensorflow:android_arm64"): [
-            "-O3",
-        ],
         clean_dep("//tensorflow:android_arm"): [
             "-mfpu=neon",
-            "-O3",
         ],
         clean_dep("//tensorflow:ios_x86_64"): [
             "-msse4.1",
@@ -29,6 +27,20 @@ def tflite_copts():
         ],
         "//conditions:default": [
             "-Wno-sign-compare",
+        ],
+    }) + select({
+        clean_dep("//tensorflow:optimized"): ["-O3"],
+        "//conditions:default": [],
+    }) + select({
+        clean_dep("//tensorflow:android"): [
+            "-ffunction-sections",  # Helps trim binary size.
+            "-fdata-sections",  # Helps trim binary size.
+        ],
+        "//conditions:default": [],
+    }) + select({
+        clean_dep("//tensorflow:windows"): [],
+        "//conditions:default": [
+            "-fno-exceptions",  # Exceptions are unused in TFLite.
         ],
     })
 
@@ -141,8 +153,8 @@ def tflite_cc_shared_object(
         copts = tflite_copts(),
         linkopts = [],
         linkstatic = 1,
-        deps = [],
-        visibility = None):
+        per_os_targets = False,
+        **kwargs):
     """Builds a shared object for TFLite."""
     tf_cc_shared_object(
         name = name,
@@ -150,12 +162,40 @@ def tflite_cc_shared_object(
         linkstatic = linkstatic,
         linkopts = linkopts + tflite_jni_linkopts(),
         framework_so = [],
-        deps = deps,
-        visibility = visibility,
+        per_os_targets = per_os_targets,
+        **kwargs
     )
 
 def tf_to_tflite(name, src, options, out):
     """Convert a frozen tensorflow graphdef to TF Lite's flatbuffer.
+
+    Args:
+      name: Name of rule.
+      src: name of the input graphdef file.
+      options: options passed to TFLite Converter.
+      out: name of the output flatbuffer file.
+    """
+
+    toco_cmdline = " ".join([
+        "$(location //tensorflow/lite/python:tflite_convert)",
+        "--enable_v1_converter",
+        "--experimental_new_converter",
+        ("--graph_def_file=$(location %s)" % src),
+        ("--output_file=$(location %s)" % out),
+    ] + options)
+    native.genrule(
+        name = name,
+        srcs = [src],
+        outs = [out],
+        cmd = toco_cmdline,
+        tools = ["//tensorflow/lite/python:tflite_convert"] + tf_binary_additional_srcs(),
+    )
+
+def DEPRECATED_tf_to_tflite(name, src, options, out):
+    """DEPRECATED Convert a frozen tensorflow graphdef to TF Lite's flatbuffer, using toco.
+
+    Please use tf_to_tflite instead.
+    TODO(b/138396996): Migrate away from this deprecated rule.
 
     Args:
       name: Name of rule.
@@ -241,8 +281,10 @@ def generated_test_models():
         "ceil",
         "concat",
         "constant",
-        "control_dep",
         "conv",
+        "conv_relu",
+        "conv_relu1",
+        "conv_relu6",
         "conv2d_transpose",
         "conv_with_shared_weights",
         "conv_to_depthwiseconv_with_shared_weights",
@@ -292,6 +334,7 @@ def generated_test_models():
         "minimum",
         "mirror_pad",
         "mul",
+        "nearest_upsample",
         "neg",
         "not_equal",
         "one_hot",
@@ -312,12 +355,13 @@ def generated_test_models():
         "relu6",
         "reshape",
         "resize_bilinear",
+        "resize_nearest_neighbor",
         "resolve_constant_strided_slice",
         "reverse_sequence",
         "reverse_v2",
-        "rfft2d",
         "round",
         "rsqrt",
+        "scatter_nd",
         "shape",
         "sigmoid",
         "sin",
@@ -336,6 +380,7 @@ def generated_test_models():
         "strided_slice_1d_exhaustive",
         "strided_slice_np_style",
         "sub",
+        "tanh",
         "tile",
         "topk",
         "transpose",
@@ -369,8 +414,12 @@ def generated_test_models_failing(conversion_mode):
             "unidirectional_sequence_rnn",
         ]
     elif conversion_mode == "forward-compat":
-        return []
-    return []
+        return [
+            "merged_models",  # b/150647401
+        ]
+    return [
+        "merged_models",  # b/150647401
+    ]
 
 def generated_test_models_successful(conversion_mode):
     """Returns the list of successful test models.
@@ -386,7 +435,7 @@ def generated_test_models_successful(conversion_mode):
 def generated_test_conversion_modes():
     """Returns a list of conversion modes."""
 
-    return ["toco-flex", "forward-compat", ""]
+    return ["toco-flex", "forward-compat", "", "mlir-quant"]
 
 def common_test_args_for_generated_models(conversion_mode, failing):
     """Returns test args for generated model tests.
@@ -556,7 +605,14 @@ def flags_for_merged_test_models(test_name, conversion_mode):
         tests_csv = tests_csv[:-1]  # Remove trailing comma.
     return " --no_tests_limit --test_sets=%s" % tests_csv
 
-def gen_zip_test(name, test_name, conversion_mode, **kwargs):
+def gen_zip_test(
+        name,
+        test_name,
+        conversion_mode,
+        test_tags,
+        test_args,
+        additional_test_tags_args = {},
+        **kwargs):
     """Generate a zipped-example test and its dependent zip files.
 
     Args:
@@ -564,6 +620,13 @@ def gen_zip_test(name, test_name, conversion_mode, **kwargs):
       test_name: str. Test targets this model. Comes from the list above.
       conversion_mode: str. Which conversion mode to run with. Comes from the
         list above.
+      test_tags: tags for the generated cc_test.
+      test_args: the basic cc_test args to be used.
+      additional_test_tags_args: a dictionary of additional test tags and args
+        to be used together with test_tags and test_args. The key is an
+        identifier which can be in creating a test tag to identify a set of
+        tests. The value is a tuple of list of additional test tags and args to
+        be used.
       **kwargs: tf_cc_test kwargs
     """
     toco = "//tensorflow/lite/toco:toco"
@@ -572,6 +635,8 @@ def gen_zip_test(name, test_name, conversion_mode, **kwargs):
         flags += " --ignore_converter_errors --run_with_flex"
     elif conversion_mode == "forward-compat":
         flags += " --make_forward_compat_test"
+    elif conversion_mode == "mlir-quant":
+        flags += " --mlir_quantizer"
     if test_name.startswith(merged_test_model_name() + "_"):
         flags += flags_for_merged_test_models(test_name, conversion_mode)
 
@@ -581,7 +646,21 @@ def gen_zip_test(name, test_name, conversion_mode, **kwargs):
         toco = toco,
         flags = flags + " --save_graphdefs",
     )
-    tf_cc_test(name, **kwargs)
+    tf_cc_test(
+        name,
+        args = test_args,
+        tags = test_tags + ["gen_zip_test"],
+        **kwargs
+    )
+    for key, value in additional_test_tags_args.items():
+        extra_tags, extra_args = value
+        extra_tags.append("gen_zip_test_%s" % key)
+        tf_cc_test(
+            name = "%s_%s" % (name, key),
+            args = test_args + extra_args,
+            tags = test_tags + extra_tags,
+            **kwargs
+        )
 
 def gen_zipped_test_file(name, file, toco, flags):
     """Generate a zip file of tests by using :generate_examples.
@@ -613,7 +692,7 @@ def gen_selected_ops(name, model, namespace = "", **kwargs):
 
     Args:
       name: Name of the generated library.
-      model: TFLite model to interpret.
+      model: TFLite models to interpret, expect a list in case of multiple models.
       namespace: Namespace in which to put RegisterSelectedOps.
       **kwargs: Additional kwargs to pass to genrule.
     """
@@ -624,12 +703,17 @@ def gen_selected_ops(name, model, namespace = "", **kwargs):
     # isinstance is not supported in skylark.
     if type(model) != type([]):
         model = [model]
+
+    input_models_args = " --input_models=%s" % ",".join(
+        ["$(location %s)" % f for f in model],
+    )
+
     native.genrule(
         name = name,
         srcs = model,
         outs = [out],
-        cmd = ("$(location %s) --namespace=%s --output_registration=$(location %s) --tflite_path=%s $(SRCS)") %
-              (tool, namespace, out, tflite_path[2:]),
+        cmd = ("$(location %s) --namespace=%s --output_registration=$(location %s) --tflite_path=%s %s") %
+              (tool, namespace, out, tflite_path[2:], input_models_args),
         tools = [tool],
         **kwargs
     )
@@ -640,7 +724,7 @@ def flex_dep(target_op_sets):
     else:
         return []
 
-def gen_model_coverage_test(src, model_name, data, failure_type, tags):
+def gen_model_coverage_test(src, model_name, data, failure_type, tags, size = "medium"):
     """Generates Python test targets for testing TFLite models.
 
     Args:
@@ -659,25 +743,203 @@ def gen_model_coverage_test(src, model_name, data, failure_type, tags):
         if failure_type[i] != "none":
             args.append("--failure_type=%s" % failure_type[i])
         i = i + 1
+
+        # Avoid coverage timeouts for large/enormous tests.
+        coverage_tags = ["nozapfhahn"] if size in ["large", "enormous"] else []
         native.py_test(
             name = "model_coverage_test_%s_%s" % (model_name, target_op_sets.lower().replace(",", "_")),
             srcs = [src],
             main = src,
-            size = "large",
+            size = size,
             args = [
                 "--model_name=%s" % model_name,
                 "--target_ops=%s" % target_op_sets,
             ] + args,
             data = data,
             srcs_version = "PY2AND3",
-            python_version = "PY2",
+            python_version = "PY3",
             tags = [
+                "no_gpu",  # Executing with TF GPU configurations is redundant.
                 "no_oss",
                 "no_windows",
-            ] + tags,
+            ] + tags + coverage_tags,
             deps = [
+                "//third_party/py/tensorflow",
                 "//tensorflow/lite/testing/model_coverage:model_coverage_lib",
                 "//tensorflow/lite/python:lite",
                 "//tensorflow/python:client_testlib",
             ] + flex_dep(target_op_sets),
         )
+
+def tflite_custom_cc_library(
+        name,
+        models = [],
+        srcs = [],
+        deps = [],
+        visibility = ["//visibility:private"]):
+    """Generates a tflite cc library, stripping off unused operators.
+
+    This library includes the TfLite runtime as well as all operators needed for the given models.
+    Op resolver can be retrieved using tflite::CreateOpResolver method.
+
+    Args:
+        name: Str, name of the target.
+        models: List of models. This TFLite build will only include
+            operators used in these models. If the list is empty, all builtin
+            operators are included.
+        srcs: List of files implementing custom operators if any.
+        deps: Additional dependencies to build all the custom operators.
+        visibility: Visibility setting for the generated target. Default to private.
+    """
+    real_srcs = []
+    real_srcs.extend(srcs)
+    real_deps = []
+    real_deps.extend(deps)
+
+    if models:
+        gen_selected_ops(
+            name = "%s_registration" % name,
+            model = models,
+        )
+        real_srcs.append(":%s_registration" % name)
+        real_srcs.append("//tensorflow/lite:create_op_resolver_with_selected_ops.cc")
+    else:
+        # Support all operators if `models` not specified.
+        real_deps.append("//tensorflow/lite:create_op_resolver_with_builtin_ops")
+
+    native.cc_library(
+        name = name,
+        srcs = real_srcs,
+        hdrs = [
+            # TODO(b/161323860) replace this by generated header.
+            "//tensorflow/lite:create_op_resolver.h",
+        ],
+        copts = tflite_copts(),
+        linkopts = select({
+            "//tensorflow:windows": [],
+            "//conditions:default": ["-lm", "-ldl"],
+        }),
+        deps = depset([
+            "//tensorflow/lite:framework",
+            "//tensorflow/lite/kernels:builtin_ops",
+        ] + real_deps),
+        visibility = visibility,
+    )
+
+def tflite_custom_android_library(
+        name,
+        models = [],
+        srcs = [],
+        deps = [],
+        custom_package = "org.tensorflow.lite",
+        visibility = ["//visibility:private"]):
+    """Generates a tflite Android library, stripping off unused operators.
+
+    Note that due to a limitation in the JNI Java wrapper, the compiled TfLite shared binary
+    has to be named as tensorflowlite_jni.so so please make sure that there is no naming conflict.
+    i.e. you can't call this rule multiple times in the same build file.
+
+    Args:
+        name: Name of the target.
+        models: List of models to be supported. This TFLite build will only include
+            operators used in these models. If the list is empty, all builtin
+            operators are included.
+        srcs: List of files implementing custom operators if any.
+        deps: Additional dependencies to build all the custom operators.
+        custom_package: Name of the Java package. It is required by android_library in case
+            the Java source file can't be inferred from the directory where this rule is used.
+        visibility: Visibility setting for the generated target. Default to private.
+    """
+    tflite_custom_cc_library(name = "%s_cc" % name, models = models, srcs = srcs, deps = deps, visibility = visibility)
+
+    # JNI wrapper expects a binary file called `libtensorflowlite_jni.so` in java path.
+    tflite_jni_binary(
+        name = "libtensorflowlite_jni.so",
+        linkscript = "//tensorflow/lite/java:tflite_version_script.lds",
+        # Do not sort: "native_framework_only" must come before custom tflite library.
+        deps = [
+            "//tensorflow/lite/java/src/main/native:native_framework_only",
+            ":%s_cc" % name,
+        ],
+    )
+
+    native.cc_library(
+        name = "%s_jni" % name,
+        srcs = ["libtensorflowlite_jni.so"],
+        visibility = visibility,
+    )
+
+    android_library(
+        name = name,
+        manifest = "//tensorflow/lite/java:AndroidManifest.xml",
+        deps = [
+            ":%s_jni" % name,
+            "//tensorflow/lite/java:tensorflowlite_java",
+            "@org_checkerframework_qual",
+        ],
+        custom_package = custom_package,
+        visibility = visibility,
+    )
+
+    aar_with_jni(
+        name = "%s_aar" % name,
+        android_library = name,
+    )
+
+def tflite_custom_c_library(
+        name,
+        models = [],
+        **kwargs):
+    """Generates a tflite cc library, stripping off unused operators.
+
+    This library includes the C API and the op kernels used in the given models.
+
+    Args:
+        name: Str, name of the target.
+        models: List of models. This TFLite build will only include
+            operators used in these models. If the list is empty, all builtin
+            operators are included.
+       **kwargs: custom c_api cc_library kwargs.
+    """
+    op_resolver_deps = "//tensorflow/lite:create_op_resolver_with_builtin_ops"
+    if models:
+        gen_selected_ops(
+            name = "%s_registration" % name,
+            model = models,
+        )
+
+        native.cc_library(
+            name = "%s_create_op_resolver" % name,
+            srcs = [
+                ":%s_registration" % name,
+                "//tensorflow/lite:create_op_resolver_with_selected_ops.cc",
+            ],
+            hdrs = ["//tensorflow/lite:create_op_resolver.h"],
+            copts = tflite_copts(),
+            deps = [
+                "//tensorflow/lite:op_resolver",
+                "//tensorflow/lite:framework",
+                "//tensorflow/lite/kernels:builtin_ops",
+            ],
+        )
+        op_resolver_deps = "%s_create_op_resolver" % name
+
+    native.cc_library(
+        name = name,
+        srcs = ["//tensorflow/lite/c:c_api_srcs"],
+        hdrs = ["//tensorflow/lite/c:c_api.h"],
+        copts = tflite_copts(),
+        deps = [
+            op_resolver_deps,
+            "//tensorflow/lite/c:common",
+            "//tensorflow/lite/c:c_api_types",
+            "//tensorflow/lite:builtin_ops",
+            "//tensorflow/lite:framework",
+            "//tensorflow/lite:version",
+            "//tensorflow/lite/core/api",
+            "//tensorflow/lite/delegates:interpreter_utils",
+            "//tensorflow/lite/delegates/nnapi:nnapi_delegate",
+            "//tensorflow/lite/kernels/internal:compatibility",
+        ],
+        **kwargs
+    )

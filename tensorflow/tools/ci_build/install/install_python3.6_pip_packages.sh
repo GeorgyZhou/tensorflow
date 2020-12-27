@@ -76,7 +76,7 @@ rm -rf /usr/lib/python3/dist-packages/six*
 # This workaround isn't needed for Ubuntu 16.04 or later.
 pip3 install --no-binary=:all: --upgrade numpy==1.14.5
 
-pip3 install scipy==0.18.1
+pip3 install scipy==1.4.1
 
 pip3 install scikit-learn==0.19.1
 
@@ -101,10 +101,9 @@ pip3 install --upgrade astor
 pip3 install --upgrade gast
 pip3 install --upgrade termcolor
 
-pip3 install --upgrade h5py==2.8.0
+pip3 install --upgrade h5py==3.1.0
 
 # Keras
-pip3 install keras_applications==1.0.8
 pip3 install keras_preprocessing==1.0.5
 
 # Estimator

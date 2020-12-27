@@ -17,6 +17,7 @@ limitations under the License.
 
 #import <XCTest/XCTest.h>
 
+#include <string>
 #include <vector>
 
 #include "tensorflow/lite/delegates/gpu/common/operations.h"
@@ -26,7 +27,6 @@ limitations under the License.
 #include "tensorflow/lite/delegates/gpu/common/util.h"
 #include "tensorflow/lite/delegates/gpu/metal/compute_task_descriptor.h"
 #include "tensorflow/lite/delegates/gpu/metal/kernels/test_util.h"
-#include "tensorflow/lite/delegates/gpu/metal/runtime_options.h"
 
 using ::tflite::gpu::BHWC;
 using ::tflite::gpu::DataType;
@@ -39,10 +39,10 @@ using ::tflite::gpu::TensorRef;
 using ::tflite::gpu::metal::CompareVectors;
 using ::tflite::gpu::metal::SingleOpModel;
 
-@interface SoftmaxTest : XCTestCase
+@interface PReLUTest : XCTestCase
 @end
 
-@implementation SoftmaxTest
+@implementation PReLUTest
 - (void)setUp {
   [super setUp];
 }
@@ -69,9 +69,9 @@ using ::tflite::gpu::metal::SingleOpModel;
   SingleOpModel model({ToString(OperationType::PRELU), attr}, {input}, {output});
   XCTAssertTrue(model.PopulateTensor(0, {-1.0, -2.0, 1.0, 2.0}));
   auto status = model.Invoke();
-  XCTAssertTrue(status.ok(), @"%s", status.ToString().c_str());
+  XCTAssertTrue(status.ok(), @"%s", std::string(status.message()).c_str());
   status = CompareVectors({-2, -4, 1, 2}, model.GetOutput(0), 1e-6f);
-  XCTAssertTrue(status.ok(), @"%s", status.ToString().c_str());
+  XCTAssertTrue(status.ok(), @"%s", std::string(status.message()).c_str());
 }
 
 - (void)testPReluLinearAlphaWithClip {
@@ -96,9 +96,9 @@ using ::tflite::gpu::metal::SingleOpModel;
   SingleOpModel model({ToString(OperationType::PRELU), attr}, {input}, {output});
   XCTAssertTrue(model.PopulateTensor(0, {-1.0, -2.0, 1.0, 2.0}));
   auto status = model.Invoke();
-  XCTAssertTrue(status.ok(), @"%s", status.ToString().c_str());
+  XCTAssertTrue(status.ok(), @"%s", std::string(status.message()).c_str());
   status = CompareVectors({-2, -4, 1, 1}, model.GetOutput(0), 1e-6f);
-  XCTAssertTrue(status.ok(), @"%s", status.ToString().c_str());
+  XCTAssertTrue(status.ok(), @"%s", std::string(status.message()).c_str());
 }
 
 - (void)testPRelu3DAlphaNoClip {
@@ -124,9 +124,9 @@ using ::tflite::gpu::metal::SingleOpModel;
   SingleOpModel model({ToString(op_type), attr}, {input}, {output});
   XCTAssertTrue(model.PopulateTensor(0, {0.0, -1.0, 2.0, -3.0}));
   auto status = model.Invoke();
-  XCTAssertTrue(status.ok(), @"%s", status.ToString().c_str());
+  XCTAssertTrue(status.ok(), @"%s", std::string(status.message()).c_str());
   status = CompareVectors({0, -2, 2, -6}, model.GetOutput(0), 1e-6f);
-  XCTAssertTrue(status.ok(), @"%s", status.ToString().c_str());
+  XCTAssertTrue(status.ok(), @"%s", std::string(status.message()).c_str());
 }
 
 - (void)testPRelu3DAlphaWithClip {
@@ -152,9 +152,9 @@ using ::tflite::gpu::metal::SingleOpModel;
   SingleOpModel model({ToString(op_type), attr}, {input}, {output});
   XCTAssertTrue(model.PopulateTensor(0, {0.0, -1.0, 2.0, -3.0}));
   auto status = model.Invoke();
-  XCTAssertTrue(status.ok(), @"%s", status.ToString().c_str());
+  XCTAssertTrue(status.ok(), @"%s", std::string(status.message()).c_str());
   status = CompareVectors({0, -2, 1, -6}, model.GetOutput(0), 1e-6f);
-  XCTAssertTrue(status.ok(), @"%s", status.ToString().c_str());
+  XCTAssertTrue(status.ok(), @"%s", std::string(status.message()).c_str());
 }
 
 @end

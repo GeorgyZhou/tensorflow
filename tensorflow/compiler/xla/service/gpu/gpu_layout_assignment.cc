@@ -68,7 +68,13 @@ HeuristicLayoutAssignment(const HloInstruction* instr,
       instr->GetModule()->config().debug_options();
 
   if (debug_options.xla_gpu_force_conv_nchw()) {
+    VLOG(2) << "Overriding layout to NCHW for " << instr->ToString();
     return kAllNCHW;
+  }
+
+  if (debug_options.xla_gpu_force_conv_nhwc()) {
+    VLOG(2) << "Overriding layout to NHWC for " << instr->ToString();
+    return kAllNHWC;
   }
 
   // If we're not Volta or not fp16, or not conv2D, the decision is easy: Use
@@ -87,7 +93,7 @@ HeuristicLayoutAssignment(const HloInstruction* instr,
   // We could have used a mixed layout combination, e.g. (NHWC, NCHW, NCHW),
   // which on paper gives good performance. However, there are two observations:
   // * a mixed layout combination is more cuDNN-bug prone, based on empirical
-  //   envidence.
+  //   evidence.
   // * we've also observed that for mixed layouts, cuDNN transposes data back
   //   and forth from a different layout combination. If we end up with
   //   transposes anyway, we prefer to have them in XLA, as they can be fused.

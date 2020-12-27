@@ -44,7 +44,6 @@ limitations under the License.
 #include "tensorflow/stream_executor/platform.h"
 #include "tensorflow/stream_executor/platform/port.h"
 #include "tensorflow/stream_executor/plugin_registry.h"
-#include "tensorflow/stream_executor/shared_memory_config.h"
 #include "tensorflow/stream_executor/trace_listener.h"
 
 namespace stream_executor {
@@ -229,14 +228,14 @@ class StreamExecutorInterface {
   virtual port::Status SynchronousMemcpyDeviceToDevice(
       DeviceMemoryBase *gpu_dst, const DeviceMemoryBase &gpu_src,
       uint64 size) = 0;
-  virtual bool MemZero(Stream *stream, DeviceMemoryBase *location,
-                       uint64 size) = 0;
-  virtual bool Memset(Stream *stream, DeviceMemoryBase *location, uint8 pattern,
-                      uint64 size) {
-    return false;
+  virtual port::Status MemZero(Stream *stream, DeviceMemoryBase *location,
+                               uint64 size) = 0;
+  virtual port::Status Memset(Stream *stream, DeviceMemoryBase *location,
+                              uint8 pattern, uint64 size) {
+    return port::InternalError("Not implemented");
   }
-  virtual bool Memset32(Stream *stream, DeviceMemoryBase *location,
-                        uint32 pattern, uint64 size) = 0;
+  virtual port::Status Memset32(Stream *stream, DeviceMemoryBase *location,
+                                uint32 pattern, uint64 size) = 0;
   virtual bool Memcpy(Stream *stream, void *host_dst,
                       const DeviceMemoryBase &gpu_src, uint64 size) = 0;
   virtual bool Memcpy(Stream *stream, DeviceMemoryBase *gpu_dst,
@@ -267,9 +266,6 @@ class StreamExecutorInterface {
   virtual int PlatformDeviceCount() = 0;
   virtual port::Status EnablePeerAccessTo(StreamExecutorInterface *other) = 0;
   virtual bool CanEnablePeerAccessTo(StreamExecutorInterface *other) = 0;
-  virtual SharedMemoryConfig GetDeviceSharedMemoryConfig() = 0;
-  virtual port::Status SetDeviceSharedMemoryConfig(
-      SharedMemoryConfig config) = 0;
 
   virtual int64 GetDeviceLoad() { return -1; }
 
@@ -286,8 +282,9 @@ class StreamExecutorInterface {
   // If ModuleHandle is set then we search for `symbol_name` only within the
   // module corresponding to `module_handle`.  Otherwise all loaded modules are
   // searched.
-  virtual bool GetSymbol(const string &symbol_name, ModuleHandle module_handle,
-                         void **mem, size_t *bytes) {
+  virtual bool GetSymbol(const std::string &symbol_name,
+                         ModuleHandle module_handle, void **mem,
+                         size_t *bytes) {
     return false;
   }
 

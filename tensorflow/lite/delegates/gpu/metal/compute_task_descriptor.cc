@@ -28,14 +28,58 @@ namespace tflite {
 namespace gpu {
 namespace metal {
 
-/// Helper function to convert buffer's content into stream of bytes
-std::vector<uint8_t> VectorFloatToHalf(const std::vector<float>& input_vector) {
-  std::vector<HalfBits> result;
-  result.reserve(input_vector.size());
-  for (const float v : input_vector) {
-    result.push_back(fp16_ieee_from_fp32_value(v));
+/// Converts float to destination type (if needed) and stores as bytes array.
+std::vector<uint8_t> GetByteBufferConverted(
+    const std::vector<float>& input_vector, DataType data_type) {
+  if (data_type == DataType::FLOAT32) {
+    return GetByteBuffer(input_vector);
+  } else {
+    std::vector<uint8_t> result;
+    result.reserve(input_vector.size() * sizeof(HalfBits));
+    for (const float value : input_vector) {
+      const HalfBits converted = fp16_ieee_from_fp32_value(value);
+      const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&converted);
+      result.insert(result.end(), bytes, bytes + sizeof(HalfBits));
+    }
+    return result;
   }
-  return VectorToUint8Vector(result);
+}
+
+/// Resizes, Converts float to destination type (if needed) and stores as bytes
+/// array.
+std::vector<uint8_t> GetByteBufferConvertedResized(
+    const std::vector<float>& input_vector, DataType data_type,
+    size_t elements_count) {
+  auto result = GetByteBufferConverted(input_vector, data_type);
+  const size_t type_size =
+      data_type == DataType::FLOAT32 ? sizeof(float) : sizeof(HalfBits);
+  result.resize(type_size * elements_count);
+  return result;
+}
+
+ComputeTaskDescriptor::ComputeTaskDescriptor(const OperationDef& def)
+    : definition(def) {}
+
+void ComputeTaskDescriptor::AddSrcTensor(const std::string& tensor_name,
+                                         const TensorDescriptor& desc) {
+  if (tensors_as_args) {
+    src_tensors_names.push_back("device FLT4* " + tensor_name + "_buffer");
+    auto desc_new = absl::make_unique<TensorDescriptor>(desc);
+    args.AddObjectRef(tensor_name, AccessType::READ, std::move(desc_new));
+  } else {
+    src_tensors_names.push_back("device FLT4* " + tensor_name);
+  }
+}
+
+void ComputeTaskDescriptor::AddDstTensor(const std::string& tensor_name,
+                                         const TensorDescriptor& desc) {
+  if (tensors_as_args) {
+    dst_tensors_names.push_back("device FLT4* " + tensor_name + "_buffer");
+    auto desc_new = absl::make_unique<TensorDescriptor>(desc);
+    args.AddObjectRef(tensor_name, AccessType::WRITE, std::move(desc_new));
+  } else {
+    dst_tensors_names.push_back("device FLT4* " + tensor_name);
+  }
 }
 
 }  // namespace metal

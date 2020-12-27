@@ -120,7 +120,7 @@ TEST(MathOpsTest, BroadcastBinaryOps_ShapeFn) {
     INFER_OK(op, "[1];[?]", "[d1_0]");
     INFER_OK(op, "[?];[2]", incompatible_shape_error ? "[d1_0]" : "?");
     INFER_OK(op, "[2];[?]", incompatible_shape_error ? "[d0_0]" : "?");
-    INFER_OK(op, "[?];[?]", incompatible_shape_error ? "[?]" : "?");
+    INFER_OK(op, "[?];[?]", "[?]");
     INFER_OK(op, "[];[?]", "[d1_0]");
     INFER_OK(op, "[?];[]", "[d0_0]");
 
@@ -229,7 +229,7 @@ TEST(MathOpsTest, Select_ShapeFn) {
   auto run_inference_for_handles = [&]() -> Status {
     CHECK(op_reg_data->shape_inference_fn != nullptr);
     c.reset(new shape_inference::InferenceContext(
-        TF_GRAPH_DEF_VERSION, &op.node_def, op_reg_data->op_def,
+        TF_GRAPH_DEF_VERSION, op.node_def, op_reg_data->op_def,
         {PartialTensorShape(), PartialTensorShape(), PartialTensorShape()}, {},
         {}, handle_data));
     TF_CHECK_OK(c->construction_status());
@@ -592,5 +592,34 @@ TEST(MathOpsTest, Bincount_ShapeFn) {
   INFER_OK(op, "?;[];?", "[?]");
   INFER_OK(op, "[?];[];?", "[?]");
   INFER_OK(op, "[?];[];[?]", "[?]");
+}
+
+TEST(MathOpsTest, SobolSample) {
+  ShapeInferenceTestOp op("SobolSample");
+
+  // All inputs should be scalar.
+  INFER_ERROR("must be rank 0", op, "[1];?;?");
+  INFER_ERROR("must be rank 0", op, "?;[1];?");
+  INFER_ERROR("must be rank 0", op, "?;?;[1]");
+
+  INFER_OK(op, "[];[];[]", "[?,?]");
+}
+
+TEST(MathOpsTest, EqualOp) {
+  ShapeInferenceTestOp op("Equal");
+  AddNodeAttr("incompatible_shape_error", true, &op.node_def);
+
+  INFER_OK(op, "?;?", "?");
+  INFER_OK(op, "[1,2];?", "?");
+  INFER_OK(op, "?;[1,2]", "?");
+
+  INFER_OK(op, "[1,2,3];[1]", "[d0_0,d0_1,d0_2]");
+  INFER_OK(op, "[?,2,1];[1,3]", "[d0_0,d0_1,d1_1]");
+  INFER_OK(op, "[1,?,3];[3,1]", "[d0_0,d1_0,d0_2]");
+  INFER_OK(op, "[1,2,3];[2,1,3]", "[d1_0,d0_1,d0_2]");
+
+  // Note: Test case for GitHub issue 40471
+  INFER_OK(op, "[?,10,1];[?,1,4]", "[?,d0_1,d1_2]");
+  INFER_OK(op, "[10,?,1];[1,?,4]", "[d0_0,?,d1_2]");
 }
 }  // end namespace tensorflow

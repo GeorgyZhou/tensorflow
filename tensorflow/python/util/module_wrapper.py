@@ -19,13 +19,12 @@ from __future__ import division
 from __future__ import print_function
 
 import importlib
-import sys
+import inspect
 import types
 
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.util import tf_decorator
 from tensorflow.python.util import tf_inspect
-from tensorflow.python.util import tf_stack
 from tensorflow.tools.compatibility import all_renames_v2
 
 
@@ -42,11 +41,12 @@ def _call_location():
   # We want to get stack frame 3 frames up from current frame,
   # i.e. above __getattr__, _tfmw_add_deprecation_warning,
   # and _call_location calls.
-  stack = tf_stack.extract_stack(limit=4)
-  if not stack:  # should never happen as we're in a function
-    return 'UNKNOWN'
-  frame = stack[0]
-  return '{}:{}'.format(frame.filename, frame.lineno)
+  frame = inspect.currentframe()
+  for _ in range(4):
+    parent = frame.f_back
+    if parent is None:
+      break
+  return '{}:{}'.format(frame.f_code.co_filename, frame.f_lineno)
 
 
 def contains_deprecation_decorator(decorators):
@@ -174,6 +174,8 @@ class TFModuleWrapper(types.ModuleType):
           attr_map[name] = attr
           return attr
 
+      # Placeholder for Google-internal contrib error
+
       attr = super(TFModuleWrapper, self).__getattribute__(name)
 
       # Return and cache dunders and our own members.
@@ -192,6 +194,8 @@ class TFModuleWrapper(types.ModuleType):
     try:
       attr = getattr(self._tfmw_wrapped_module, name)
     except AttributeError:
+      # Placeholder for Google-internal contrib error
+
       if not self._tfmw_public_apis:
         raise
       if name not in self._tfmw_public_apis:
@@ -232,11 +236,5 @@ class TFModuleWrapper(types.ModuleType):
   def __repr__(self):
     return self._tfmw_wrapped_module.__repr__()
 
-  def __getstate__(self):
-    return self.__name__
-
-  def __setstate__(self, d):
-    # pylint: disable=protected-access
-    self.__init__(sys.modules[d]._tfmw_wrapped_module,
-                  sys.modules[d]._tfmw_module_name)
-    # pylint: enable=protected-access
+  def __reduce__(self):
+    return importlib.import_module, (self.__name__,)

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tensorflow/lite/delegates/gpu/cl/kernels/strided_slice.h"
+#include "tensorflow/lite/delegates/gpu/common/tasks/strided_slice.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -44,21 +44,23 @@ TEST_F(OpenCLOperationTest, StridedSlice) {
                      half(21.1f), half(21.2f), half(21.3f), half(21.4)};
 
   SliceAttributes attr;
-  attr.starts = HWC(1, 0, 1);
-  attr.ends = HWC(2, 2, 3);
-  attr.strides = HWC(1, 2, 2);
+  attr.starts = BHWC(0, 1, 0, 1);
+  attr.ends = BHWC(src_tensor.shape.b, 2, 2, 3);
+  attr.strides = BHWC(1, 1, 2, 2);
 
   for (auto storage : env_.GetSupportedStorages()) {
     for (auto precision : env_.GetSupportedPrecisions()) {
       OperationDef op_def;
       op_def.precision = precision;
       auto data_type = DeduceDataTypeFromPrecision(precision);
-      op_def.src_tensors.push_back({data_type, storage});
-      op_def.dst_tensors.push_back({data_type, storage});
+      op_def.src_tensors.push_back({data_type, storage, Layout::HWC});
+      op_def.dst_tensors.push_back({data_type, storage, Layout::HWC});
       TensorFloat32 dst_tensor;
       StridedSlice operation = CreateStridedSlice(op_def, attr);
-      ASSERT_OK(ExecuteGPUOperation(src_tensor, creation_context_, &operation,
-                                    BHWC(1, 2, 1, 2), &dst_tensor));
+      ASSERT_OK(ExecuteGPUOperation(
+          src_tensor, creation_context_,
+          absl::make_unique<StridedSlice>(std::move(operation)),
+          BHWC(1, 2, 1, 2), &dst_tensor));
       EXPECT_THAT(dst_tensor.data,
                   Pointwise(FloatNear(0.0f), {half(10.2f), half(10.4),
                                               half(20.2f), half(20.4)}));

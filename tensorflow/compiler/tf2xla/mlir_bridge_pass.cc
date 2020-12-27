@@ -17,93 +17,52 @@ limitations under the License.
 
 #include <string>
 
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringRef.h"
-#include "llvm/Support/raw_os_ostream.h"
-#include "mlir/IR/Attributes.h"  // TF:local_config_mlir
-#include "mlir/IR/Builders.h"  // TF:local_config_mlir
-#include "mlir/IR/Module.h"  // TF:local_config_mlir
+#include "tensorflow/compiler/mlir/tensorflow/ir/tf_structs.h"
 #include "tensorflow/compiler/mlir/tensorflow/transforms/bridge.h"
-#include "tensorflow/compiler/mlir/tensorflow/translate/export_graphdef.h"
-#include "tensorflow/compiler/mlir/tensorflow/translate/import_model.h"
-#include "tensorflow/compiler/mlir/tensorflow/translate/mlir_roundtrip_flags.h"
-#include "tensorflow/core/common_runtime/device.h"
-#include "tensorflow/core/common_runtime/device_set.h"
-#include "tensorflow/core/graph/graph_constructor.h"
+#include "tensorflow/compiler/mlir/tensorflow/utils/device_util.h"
+#include "tensorflow/core/lib/monitoring/gauge.h"
+#include "tensorflow/core/public/session_options.h"
 #include "tensorflow/core/util/device_name_utils.h"
+
+namespace {
+
+// Checks if the module has any TPU devices in its device list.
+bool HasTPUDevice(mlir::ModuleOp op) {
+  mlir::TF::RuntimeDevices devices;
+  if (failed(tensorflow::GetDevicesFromOp(op.getOperation(), &devices)))
+    return false;
+
+  for (const auto& device : devices.device_names()) {
+    if (device.has_type && device.type == "TPU") return true;
+  }
+  return false;
+}
+}  // namespace
 
 namespace tensorflow {
 
-// Collects all devices known to the system by name and adds them as an array
-// attribute of string attributes to the module. Device names added are in the
-// following form:
-//   /job:<name>/replica:<replica>/task:<task>/device:<type>:<device_num>
-static void AddDevicesToModule(mlir::ModuleOp module,
-                               const DeviceSet* device_set) {
-  if (!device_set) return;
+auto* mlir_bridge_gauge_v1 = monitoring::Gauge<bool, 0>::New(
+    "/tensorflow/config/experimental/enable_mlir_bridge_gauge_v1",
+    "Tracks usage of the MLIR-based TF2XLA bridge among TF1 models");
+auto* mlir_bridge_gauge_v2 = monitoring::Gauge<bool, 0>::New(
+    "/tensorflow/config/experimental/enable_mlir_bridge_gauge_v2",
+    "Tracks usage of the MLIR-based TF2XLA bridge among TF2 models");
 
-  // Collect devices as strings in TensorFlow device name form.
-  llvm::SmallVector<std::string, 8> devices;
-  devices.reserve(device_set->devices().size());
-  for (Device* device : device_set->devices())
-    devices.push_back(
-        DeviceNameUtils::ParsedNameToString(device->parsed_name()));
-
-  llvm::SmallVector<llvm::StringRef, 8> device_refs(devices.begin(),
-                                                    devices.end());
-  mlir::Builder builder(module);
-  module.setAttr("tf.devices", builder.getStrArrayAttr(device_refs));
-}
-
-// Dumps the MLIR module to disk.
-// This require the TF_DUMP_GRAPH_PREFIX to be set to a path that exist (or can
-// be created).
-static void DumpModule(mlir::ModuleOp module, llvm::StringRef file_prefix) {
-  const char* prefix_env = getenv("TF_DUMP_GRAPH_PREFIX");
-  if (!prefix_env) {
-    LOG(WARNING)
-        << "Failed to dump MLIR module because dump location is not "
-        << " specified through TF_DUMP_GRAPH_PREFIX environment variable.";
-    return;
-  }
-  std::string prefix = prefix_env;
-
-  auto* env = tensorflow::Env::Default();
-  auto status = env->RecursivelyCreateDir(prefix);
-  if (!status.ok()) {
-    LOG(WARNING) << "cannot create directory '" + prefix +
-                        "': " + status.error_message();
-    return;
-  }
-  prefix += "/" + file_prefix.str();
-  if (!tensorflow::Env::Default()->CreateUniqueFileName(&prefix, ".mlir")) {
-    LOG(WARNING) << "cannot create unique filename, won't dump MLIR module.";
-    return;
-  }
-
-  std::unique_ptr<WritableFile> file_writer;
-  status = env->NewWritableFile(prefix, &file_writer);
-  if (!status.ok()) {
-    LOG(WARNING) << "cannot open file '" + prefix +
-                        "': " + status.error_message();
-    return;
-  }
-
-  // Print the module to a string before writing to the file.
-  std::string txt_module;
-  {
-    llvm::raw_string_ostream os(txt_module);
-    module.print(os);
-  }
-
-  status = file_writer->Append(txt_module);
-  if (!status.ok()) {
-    LOG(WARNING) << "error writing to file '" + prefix +
-                        "': " + status.error_message();
-    return;
-  }
-  (void)file_writer->Close();
-  VLOG(1) << "Dumped MLIR module to " << prefix;
+// Analyzes the user requested policy as well as the contents of the graph and
+// determines whether the MLIR Bridge should be run.
+//
+// If the user explicitly requests the bridge be enabled or disabled, this
+// function will respect the request. If the user does not explicitly request
+// enabled or disabled, it will decide whether or not to run the bridge.
+//
+// The config_proto param is a required input for all TF1 graphs but it is
+// redundant for TF2 graphs.
+bool IsMlirBridgePassEnabled(const Graph& graph,
+                             const absl::optional<ConfigProto>& config_proto) {
+  MlirBridgeRolloutPolicy policy =
+      GetMlirBridgeRolloutPolicy(graph, config_proto);
+  return (policy == MlirBridgeRolloutPolicy::kEnabledByUser ||
+          policy == MlirBridgeRolloutPolicy::kEnabledAfterGraphAnalysis);
 }
 
 // This runs the first phase of the "bridge", transforming the graph in a form
@@ -112,31 +71,48 @@ static void DumpModule(mlir::ModuleOp module, llvm::StringRef file_prefix) {
 // and attached to a "compile" operation, whose result is fed to an "execute"
 // operation. The kernel for these operations is responsible to lower the
 // encapsulated graph to a particular device.
-Status MlirBridgePass::Run(const GraphOptimizationPassOptions& options) {
-  if (!options.session_options->config.experimental().enable_mlir_bridge()) {
-    VLOG(1) << "Skipping MLIR Bridge Pass, session flag not enabled";
+Status MlirBridgePass::Run(const ConfigProto& config_proto,
+                           mlir::ModuleOp module, const Graph& graph) {
+  if (!IsEnabled(config_proto, graph)) {
+    VLOG(0) << "Skipping MLIR TPU Bridge, session flag not enabled";
+    mlir_bridge_gauge_v2->GetCell()->Set(false);
     return Status::OK();
   }
-  GraphDebugInfo debug_info;
-  mlir::MLIRContext context;
-  GraphImportConfig specs;
-  GraphExportConfig confs;
-  TF_ASSIGN_OR_RETURN(auto module,
-                      ConvertGraphToMlir(**options.graph, debug_info,
-                                         *options.flib_def, specs, &context));
 
-  AddDevicesToModule(*module, options.device_set);
+  // Skip MLIR TPU Bridge if no TPU devices found.
+  if (!HasTPUDevice(module)) {
+    VLOG(0) << "Skipping MLIR TPU Bridge, no TPU devices found";
+    return Status::OK();
+  }
 
-  if (VLOG_IS_ON(1)) DumpModule(*module, "mlir_bridge_before_");
+  VLOG(0) << "Running MLIR TPU Bridge";
+  mlir_bridge_gauge_v2->GetCell()->Set(true);
+  TF_RETURN_IF_ERROR(
+      mlir::TFTPU::TPUBridge(module, /*enable_logging=*/VLOG_IS_ON(1)));
 
-  // Run the bridge now
-  TF_RETURN_IF_ERROR(mlir::TFTPU::TPUBridge(*module));
+  return Status::OK();
+}
+Status MlirBridgeV1CompatPass::Run(const GraphOptimizationPassOptions& options,
+                                   mlir::ModuleOp module) {
+  // Skip function graphs as MlirBridgePass will be used instead.
+  if (options.is_function_graph) return Status::OK();
 
-  if (VLOG_IS_ON(1)) DumpModule(*module, "mlir_bridge_after_");
+  if (!IsEnabled(options.session_options->config, **options.graph)) {
+    VLOG(0) << "Skipping MLIR TPU Bridge V1 Compat, session flag not enabled";
+    mlir_bridge_gauge_v1->GetCell()->Set(false);
+    return Status::OK();
+  }
 
-  TF_RETURN_WITH_CONTEXT_IF_ERROR(
-      ConvertMlirToGraph(*module, confs, options.graph, options.flib_def),
-      "Error converting MLIR module back to graph");
+  // Skip MLIR TPU Bridge if no TPU devices found.
+  if (!HasTPUDevice(module)) {
+    VLOG(0) << "Skipping MLIR TPU Bridge V1 Compat, no TPU devices found";
+    return Status::OK();
+  }
+
+  VLOG(0) << "Running MLIR TPU Bridge V1 Compat";
+  mlir_bridge_gauge_v1->GetCell()->Set(true);
+  TF_RETURN_IF_ERROR(
+      mlir::TFTPU::TPUBridgeV1Compat(module, /*enable_logging=*/VLOG_IS_ON(1)));
 
   return Status::OK();
 }

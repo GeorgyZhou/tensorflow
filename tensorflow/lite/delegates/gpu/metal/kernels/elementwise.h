@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <vector>
 
+#include "tensorflow/lite/delegates/gpu/common/model.h"
 #include "tensorflow/lite/delegates/gpu/common/operations.h"
 #include "tensorflow/lite/delegates/gpu/metal/compute_task_descriptor.h"
 
@@ -25,12 +26,19 @@ namespace tflite {
 namespace gpu {
 namespace metal {
 
-std::vector<ComputeTaskDescriptorPtr> ElementwiseWithTwoInputs(
-    int id, std::vector<ValueId> input_ids, ValueId output_id,
-    OperationType op_type);
+// One input is one runtime tensor
+ComputeTaskDescriptor ElementwiseWithOneInput(const OperationDef& definition,
+                                              OperationType op_type);
 
-std::vector<ComputeTaskDescriptorPtr> ElementwiseWithOneInput(
-    int id, ValueId input_id, ValueId output_id, OperationType op_type);
+// Two inputs are two runtime tensors
+ComputeTaskDescriptor ElementwiseWithTwoInputs(const OperationDef& definition,
+                                               const BHWC& second_shape,
+                                               OperationType op_type);
+
+// First input is one runtime tensor and second input is constant argument
+ComputeTaskDescriptor ElementwiseWithOneInputAndConstantArguent(
+    const OperationDef& definition, OperationType op_type,
+    const TensorOrScalar& attr);
 
 }  // namespace metal
 }  // namespace gpu

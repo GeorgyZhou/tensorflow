@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/strings/string_view.h"
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallVector.h"
 #include "tensorflow/core/framework/types.pb.h"
 
@@ -38,17 +39,53 @@ struct QuantizationSpecs {
   // DT_HALF and DT_QINT8 inference type.
   bool weight_quantization = false;
 
+  // Whether the quantization passes are triggered for post-training
+  // quantization. If it is true, the model input doesn't require user specified
+  // input ranges.
+  // TODO(fengliuai): The `weight_quantization` is just a special case of
+  // post-training quantization. We need to deprecate the `weight_quantization`.
+  bool post_training_quantization = false;
+
+  // When set to true, quantization will be done per-tensor. Currently, this
+  // option is only valid when the quantization parameters need to be created by
+  // scanning the constant content (post-training quantization or QAT without
+  // weight FakeQuant).
+  bool disable_per_channel = false;
+
+  // When set to true, the fixed output ranges of the activation ops (tanh,
+  // sigmoid, etc.) and the weight constants are not inferred. Then, to quantize
+  // these ops, quantization emulation ops should be placed after the ops in the
+  // input graph. This flag should be set to false for post-training
+  // quantization.
+  bool disable_infer_tensor_range = false;
+
   // The node type when the model is exported. Currently this is limited to
   // DT_FLOAT, DT_HALF, DT_QINT8, and DT_QUINT8. When DT_HALF is used, the
   // `weight_quantization` flag needs to set to true. When DT_QUINT8 is used,
   // the `weight_quantization` flag needs to set to false.
   tensorflow::DataType inference_type = tensorflow::DT_FLOAT;
 
+  // The input and output data type during inference. This flag is only used
+  // when `inference_type` is different from DT_FLOAT. This flag can only be set
+  // to DT_FLOAT or as same as `inference_type`. If this flag is different
+  // from `inference_type`, adaptor ops are inserted as heading and tailing ops
+  // in the result model.
+  tensorflow::DataType inference_input_type = tensorflow::DT_FLOAT;
+
   // Input node ranges. These ranges are stored as the same order of function
   // arguments. They are only used when `weight_quantization` is set to false,
   // and the model is required to have quantization parameters, either from
   // quantization aware training or calibration, for the remaining tensors.
-  std::vector<std::pair<double, double>> input_ranges;
+  std::vector<std::pair<llvm::Optional<double>, llvm::Optional<double>>>
+      input_ranges;
+
+  // The default ranges can be used when a tensor doesn't have quantization
+  // parameters and couldn't be quantized. Used only for latency tests.
+  std::pair<llvm::Optional<double>, llvm::Optional<double>> default_ranges;
+
+  // A serialized "QuantizationInfo" object to specify value ranges for some of
+  // the tensors with known names.
+  std::string serialized_quant_stats = "";
 
   // Whether run the passes to propagate the quantization parameters and graph
   // rewrites. Returns false if the inference_type is DT_FLOAT or
@@ -61,7 +98,7 @@ struct QuantizationSpecs {
   bool RunWeightQuantization() const { return weight_quantization; }
 
   // Whether this inference type represents a signed storage type.
-  bool IsSignedInferneceType() {
+  bool IsSignedInferenceType() const {
     switch (inference_type) {
       case tensorflow::DT_QUINT8:
       case tensorflow::DT_QUINT16:
@@ -73,7 +110,7 @@ struct QuantizationSpecs {
 
   // Gets the width of this quantization type. Returns 0 if it isn't a
   // quantization type.
-  int64_t GetQuantizationTypeWidth() {
+  int64_t GetQuantizationTypeWidth() const {
     switch (inference_type) {
       case tensorflow::DT_QINT8:
       case tensorflow::DT_QUINT8:
@@ -87,6 +124,10 @@ struct QuantizationSpecs {
         return 0;
     }
   }
+
+  // Whether add the NumericVerify ops to verify numbers before and after
+  // quantization.
+  bool verify_numeric = false;
 };
 
 // Parses the command line flag strings to the quantization specification for
@@ -101,11 +142,11 @@ bool ParseInputNodeQuantSpecs(absl::string_view node_names,
 // Gets the quantization specification for input arrays. The array names are not
 // stored in the spec, and will be matched by position. The min/max will be
 // ignored if the inference_type isn't a quantized type. Returns true if failed.
-bool GetInputNodeQuantSpecs(const std::vector<std::string>& node_names,
-                            const std::vector<double>& node_mins,
-                            const std::vector<double>& node_maxs,
-                            tensorflow::DataType inference_type,
-                            QuantizationSpecs* quant_specs);
+bool GetInputNodeQuantSpecs(
+    const std::vector<std::string>& node_names,
+    const std::vector<llvm::Optional<double>>& node_mins,
+    const std::vector<llvm::Optional<double>>& node_maxs,
+    tensorflow::DataType inference_type, QuantizationSpecs* quant_specs);
 
 }  // namespace TFL
 }  // namespace mlir

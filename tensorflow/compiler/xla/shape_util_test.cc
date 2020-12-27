@@ -26,6 +26,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
+#include "tensorflow/core/platform/test_benchmark.h"
 
 namespace xla {
 namespace {
@@ -732,6 +733,15 @@ TEST(ShapeUtilTest, PermuteDimensionsLayout) {
   } while (std::next_permutation(layout.begin(), layout.end()));
 }
 
+TEST(ShapeUtilTest, UpdateDynamicDimensions) {
+  Shape shape = ShapeUtil::MakeShape(F32, {10, 100, 1000});
+
+  Shape tuple_shape = ShapeUtil::MakeTupleShape({shape});
+
+  ShapeUtil::UpdateDynamicDimension(&tuple_shape, {0}, 1, true);
+  EXPECT_TRUE(ShapeUtil::GetSubshape(tuple_shape, {0}).is_dynamic_dimension(1));
+}
+
 TEST(ShapeUtilTest, PermuteDynamicDimensions) {
   Shape shape =
       ShapeUtil::MakeShape(F32, {10, 100, 1000},
@@ -817,6 +827,20 @@ TEST(AlignmentTest,
       input, ShapeUtil::MakeShape(xla::F32, {4, 3, 2, 5, 77}));
   EXPECT_FALSE(aligned_shape);
 }
+
+void BM_MakeShape(::testing::benchmark::State& state) {
+  for (auto s : state) {
+    ShapeUtil::MakeShape(F32, {2});
+  }
+}
+BENCHMARK(BM_MakeShape);
+
+void BM_MakeValidatedShape(::testing::benchmark::State& state) {
+  for (auto s : state) {
+    ShapeUtil::MakeValidatedShape(F32, {2}).ValueOrDie();
+  }
+}
+BENCHMARK(BM_MakeValidatedShape);
 
 }  // namespace
 }  // namespace xla

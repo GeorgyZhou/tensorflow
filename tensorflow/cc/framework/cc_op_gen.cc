@@ -29,7 +29,6 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/gtl/map_util.h"
-#include "tensorflow/core/lib/gtl/stl_util.h"
 #include "tensorflow/core/lib/hash/hash.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
@@ -61,7 +60,7 @@ string GetPath(const string& dot_h_fname) {
   if (result.size() > sizeof("external/") &&
       result.compare(0, sizeof("external/") - 1, "external/") == 0) {
     result = result.substr(sizeof("external/") - 1);
-    pos = result.find("/");
+    pos = result.find('/');
     if (pos != string::npos) {
       result = result.substr(pos + 1);
     }
@@ -330,7 +329,7 @@ std::pair<const char*, bool> AttrTypeName(StringPiece attr_type) {
       new std::unordered_map<StringPiece, std::pair<const char*, bool>,
                              StringPieceHasher>{
           {"string", {"StringPiece", false}},
-          {"list(string)", {"gtl::ArraySlice<string>", true}},
+          {"list(string)", {"gtl::ArraySlice<::tensorflow::tstring>", true}},
           {"int", {"int64", false}},
           {"list(int)", {"gtl::ArraySlice<int>", true}},
           {"float", {"float", false}},
@@ -587,7 +586,7 @@ OpInfo::OpInfo(const OpDef& graph_op_def, const ApiDef& api_def,
   if (!api_def.description().empty()) {
     strings::StrAppend(&comment, "\n", api_def.description(), "\n");
   }
-  strings::StrAppend(&comment, "\nArguments:\n* scope: A Scope object\n");
+  strings::StrAppend(&comment, "\nArgs:\n* scope: A Scope object\n");
 
   // Process inputs
   for (int i = 0; i < api_def.arg_order_size(); ++i) {

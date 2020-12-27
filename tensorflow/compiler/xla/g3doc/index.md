@@ -1,12 +1,13 @@
-# XLA: Optimizing Compiler for TensorFlow
+# XLA: Optimizing Compiler for Machine Learning
 
 XLA (Accelerated Linear Algebra) is a domain-specific compiler for linear
-algebra that accelerates TensorFlow models with potentially no source code
+algebra that can accelerate TensorFlow models with potentially no source code
 changes.
 
-The results are improvements in speed and memory usage: most internal benchmarks
-run ~1.15x faster after XLA is enabled. The dataset below is evaluated on a
-single NVidia V100 GPU:
+The results are improvements in speed and memory usage: e.g. in BERT
+[MLPerf](https://blog.tensorflow.org/2020/07/tensorflow-2-mlperf-submissions.html)
+submission using 8 Volta V100 GPUs using XLA has achieved a ~7x performance
+improvement and ~5x batch size improvement:
 
 <div style="width:90%; margin:auto; margin-bottom:10px; margin-top:20px;">
 <img style="width:90%" src="./images/tf_xla_performance.png">
@@ -18,11 +19,11 @@ When a TensorFlow program is run, all of the operations are executed
 individually by the TensorFlow executor. Each TensorFlow operation has a
 precompiled GPU kernel implementation that the executor dispatches to.
 
-XLA provides an alternative mode of running TF models: it compiles the
-TensorFlow graph into a sequence of computation kernels generated specifically
-for the given model. Because these kernels are unique to the model, they can
-exploit model-specific information for optimization. For example, let's look at
-an optimization XLA does in the context of a simple TensorFlow computation:
+XLA provides an alternative mode of running models: it compiles the TensorFlow
+graph into a sequence of computation kernels generated specifically for the
+given model. Because these kernels are unique to the model, they can exploit
+model-specific information for optimization. For example, let's look at an
+optimization XLA does in the context of a simple TensorFlow computation:
 
 ```
 def model_fn(x, y, z):
@@ -42,31 +43,70 @@ removing memory operations is one of the best ways to improve performance.
 
 ## Enable XLA for TensorFlow models
 
+### Explicit compilation with `tf.function(jit_compile=True)`
+
+Explicit compilation API offers a fine-grained control for choosing which
+functions should be compiled. For example, the following TensorFlow function
+which performs the MNIST training is compiled with XLA:
+
+```
+@tf.function(jit_compile=True)
+def train_mnist(images, labels):
+    images, labels = cast(images, labels)
+
+    with tf.GradientTape() as tape:
+      predicted_labels = layer(images)
+      loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(
+          logits=predicted_labels, labels=labels
+      ))
+    layer_variables = layer.trainable_variables
+    grads = tape.gradient(loss, layer_variables)
+    optimizer.apply_gradients(zip(grads, layer_variables))
+```
+
+The `jit_compile` API has _must-compile_ semantics: either the entire
+function is compiled with XLA, or an `errors.InvalidArgumentError` exception is
+thrown. XLA can not currently compile functions where dimensions are not
+_inferrable_: that is, if it's not possible to infer the dimensions of all
+tensors without running the entire computation. For example, the following
+function will not compile:
+
+```
+@tf.function
+def not_compilable(x):
+  return tf.unique(x)
+```
+
+Shapes can vary across the runs though:
+
+```
+@tf.function(jit_compile=True)
+def recompiled_on_launch(a, b):
+  return a + b
+
+recompiled_on_launch(tf.ones([1, 10]), tf.ones([1, 10]))
+recompiled_on_launch(tf.ones([1, 100]), tf.ones([1, 100]))
+```
+
+Note: Nesting behavior: the function will be compiled if at least one function
+in its call stack has `jit_compile=True`.
+
+See the [tutorial colab](./tutorials/jit_compile.ipynb) for a more detailed
+usage example.
+
 ### Auto-clustering
 
-A simplest way to start using XLA in TensorFlow models is to enable
-_auto-clustering_, which automatically finds _clusters_ (connected subgraphs)
-within the TensorFlow graph which can be compiled and executed using XLA.
-Auto-clustering on GPU can be enabled by either modifying the `TF_XLA_FLAGS`
+A simple way to start using XLA in TensorFlow models without any changes is to
+enable _auto-clustering_, which automatically finds _clusters_ (connected
+subgraphs) within the TensorFlow functions which can be compiled and executed
+using XLA. Auto-clustering on GPU can be enabled by setting the `TF_XLA_FLAGS`
 environment variable:
+
+Note: In TF2, only the code inside `tf.function` will be clustered.
 
 ```
 $ TF_XLA_FLAGS=--tf_xla_auto_jit=2 path/to/your/tf/program
 ```
-
-Or by setting a configuration value within the program:
-
-```
-import tensorflow as tf
-
-tf.config.optimizer.set_jit(True)
-
-# ... the rest of your program ...
-```
-
-Note: The JIT level is cached for a session, and can only be set in the very
-beginning of the program. In order to change it midway through, the session
-needs to be cleared: `tf.keras.backend.clear_session()`
 
 Auto-clustering is currently optimized for GPU workloads, but it can also be
 enabled on CPU by additionally using the flag `--tf_xla_cpu_global_jit`:
@@ -75,24 +115,16 @@ enabled on CPU by additionally using the flag `--tf_xla_cpu_global_jit`:
 $ TF_XLA_FLAGS="--tf_xla_auto_jit=2 --tf_xla_cpu_global_jit" path/to/your/program
 ```
 
-For a detailed usage example, see the
+Note: Auto-clustering support on CPU and on multi-GPU environments is
+experimental.
+
+For a detailed usage example see the
 [auto-clustering tutorial colab](./tutorials/autoclustering_xla.ipynb).
-
-### Use `xla.compile`
-
-The `xla.compile` API offers a more fine-grained control for choosing which
-functions should be compiled with XLA. However, it requires restructuring source
-code, as not all TensorFlow operations can be represented in XLA. That is, when
-using `xla.compile` you pass it the functions which should be compiled using
-XLA; a failure to compile results in an exception.
-
-See the [`xla.compile` tutorial colab](./tutorials/xla_compile.ipynb) for usage
-examples.
 
 ### AOT (Ahead-of-time) compilation for CPU with `tfcompile`
 
-You can also use a standalone [`tfcompile`](./tfcompile) tool,
-which converts TensorFlow graph into executable code (for CPU only).
+You can also use a standalone [`tfcompile`](./tfcompile.md) tool, which converts
+TensorFlow graph into executable code (for x86-64 CPU only).
 
 ## Inspect compiled programs
 
@@ -101,8 +133,7 @@ programs. To dump the generated programs, use the environment variable
 `XLA_FLAGS`:
 
 ```
-$ XLA_FLAGS="--dump_hlo_as_text --xla_dump_to=/tmp/generated"
-TF_XLA_FLAGS="--tf_xla_auto_jit=2" my/tensorflow/program
+$ XLA_FLAGS="--xla_dump_to=/tmp/generated" TF_XLA_FLAGS="--tf_xla_auto_jit=2" my/tensorflow/program
 ```
 
 After the dumping is performed, you can find the following files in
@@ -127,13 +158,7 @@ the TensorFlow graph with:
 $ TF_DUMP_GRAPH_PREFIX=/tmp/generated TF_XLA_FLAGS="--tf_xla_clustering_debug"
 ```
 
-## Supported platforms
-
-Auto-clustering is supported on NVIDIA GPUs, and ahead-of-time compilation is
-supported on x86-64 CPUs. Auto-clustering support on multi-GPU environments and
-on a CPU is experimental.
-
-## Generating great bug reports
+## Reproducible bug reports
 
 A bug report is much easier to reproduce if it includes dumps for the generated
 XLA programs and the used auto-clustering embedding.
@@ -151,11 +176,12 @@ When filing bugs, attach the contents of the `/tmp/generated` directory
 
 If possible, try to isolate
 a bug to a single XLA program by using the
-[`replay_computation`](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/compiler/xla/tools/replay_computation.cc)
+[`replay_computation`](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/compiler/xla/tools/run_hlo_module_main.cc)
 and iteratively running it on generated programs.
 
 ## Further reading
 
+-   [Known Issues](./known_issues.md) List of known issues with XLA
 -   [XLA Architecture](./architecture.md): Overview of the XLA architecture
 -   [XLA - TensorFlow, Compiled](https://developers.googleblog.com/2017/03/xla-tensorflow-compiled.html):
     Read on Google Developers Blog
@@ -163,7 +189,17 @@ and iteratively running it on generated programs.
     [XLA source](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/compiler/xla)
     on Github!
 
-<iframe frameborder="0" allowfullscreen="1" allow="accelerometer; autoplay;
-encrypted-media; gyroscope; picture-in-picture" width="640" height="360"
+## XLA Frontends
+
+Apart from TensorFlow, XLA programs can be generated by:
+
+-   [JAX](https://github.com/google/jax): Composable transformations of
+    Python+NumPy programs
+-   [Julia](https://github.com/JuliaTPU/XLA.jl): The Julia language for
+    scientific computing
+-   [PyTorch](https://github.com/pytorch/xla): PyTorch framework
+
+<iframe frameborder="0" allow="accelerometer; autoplay;
+encrypted-media; gyroscope; picture-in-picture; fullscreen" width="640" height="360"
 src="https://www.youtube.com/embed/kAOanJczHA0?origin=https%3A%2F%2Fwww.tensorflow.org&amp;autohide=1&amp;showinfo=0&amp;video-id=kAOanJczHA0&amp;enablejsapi=1&amp;widgetid=1"
 id="widget2" data-title="YouTube video player"></iframe>

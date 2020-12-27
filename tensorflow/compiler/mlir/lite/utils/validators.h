@@ -19,8 +19,8 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_MLIR_LITE_UTILS_VALIDATORS_H_
 #define TENSORFLOW_COMPILER_MLIR_LITE_UTILS_VALIDATORS_H_
 
-#include "mlir/Dialect/StandardOps/Ops.h"  // TF:local_config_mlir
-#include "mlir/IR/StandardTypes.h"  // TF:local_config_mlir
+#include "mlir/Dialect/StandardOps/IR/Ops.h"  // from @llvm-project
+#include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 
 namespace mlir {
 namespace TFL {
@@ -45,12 +45,23 @@ bool TFIntListIs1XY1(Operation *op, StringRef name, IntegerAttr *x,
 // Returns true if the attribute is an integer list of the form [1, X, Y, 1],
 bool TFIntListIs1XY1(const ArrayAttr &attr);
 
-// Returns true iff the given value is a float tensor.
+// Returns true if every element of the attribute is 1. All elements of `attr`
+// must be `IntegerAttr`.
+bool TFIntListIsAllOnes(const ArrayAttr &attr);
+
+// Returns true iff the given value is a float32 tensor.
 // is "DT_FLOAT".
-inline bool TFTypeIsFloatTensor(Value *value) {
-  auto tensorType = value->getType().dyn_cast<TensorType>();
+inline bool TFTypeIsFloat32Tensor(Value value) {
+  auto tensorType = value.getType().dyn_cast<TensorType>();
   if (!tensorType) return false;
-  return tensorType.getElementType().isa<FloatType>();
+  return tensorType.getElementType().isF32();
+}
+
+// Returns true iff the given value is a bf16 tensor.
+inline bool TFTypeIsBFloat16Tensor(Value value) {
+  auto tensorType = value.getType().dyn_cast<TensorType>();
+  if (!tensorType) return false;
+  return tensorType.getElementType().isBF16();
 }
 
 // Returns true iff the given TensorFlow op has a `padding` attribute whose
@@ -66,6 +77,10 @@ inline bool TFPaddingIsSameOrValid(Operation *op, StringAttr *padding) {
 /// Returns whether the given `a` and `b` have broadcast-compatible
 /// types.
 bool IsBroadcastableElementsAttrs(mlir::Attribute a, mlir::Attribute b);
+// Returns true if every dimension of the attribute is 1 except the last one.
+bool IsDimensionsDegenerateExceptLastOne(mlir::Attribute val);
+// Returns true if every element is 1 except the last one.
+bool IsDimensionsDegenerateExceptLastOne(ArrayRef<int64_t> elements_shape);
 
 }  // end namespace TFL
 }  // end namespace mlir

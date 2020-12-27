@@ -17,6 +17,7 @@ limitations under the License.
 
 #import <XCTest/XCTest.h>
 
+#include <string>
 #include <vector>
 
 #include "tensorflow/lite/delegates/gpu/common/operations.h"
@@ -26,7 +27,6 @@ limitations under the License.
 #include "tensorflow/lite/delegates/gpu/common/util.h"
 #include "tensorflow/lite/delegates/gpu/metal/compute_task_descriptor.h"
 #include "tensorflow/lite/delegates/gpu/metal/kernels/test_util.h"
-#include "tensorflow/lite/delegates/gpu/metal/runtime_options.h"
 
 using ::tflite::gpu::BHWC;
 using ::tflite::gpu::DataType;
@@ -72,13 +72,12 @@ using ::tflite::gpu::metal::SingleOpModel;
   output.ref = 2;
   output.shape = BHWC(1, 1, 1, 4);
 
-  SingleOpModel model({ToString(OperationType::FULLY_CONNECTED), attr}, {input},
-                      {output});
+  SingleOpModel model({ToString(OperationType::FULLY_CONNECTED), attr}, {input}, {output});
   XCTAssertTrue(model.PopulateTensor(0, {1, 2}));
   auto status = model.Invoke();
-  XCTAssertTrue(status.ok(), @"%s", status.ToString().c_str());
+  XCTAssertTrue(status.ok(), @"%s", std::string(status.message()).c_str());
   status = CompareVectors({6, 13, 20, 27}, model.GetOutput(0), 1e-6f);
-  XCTAssertTrue(status.ok(), @"%s", status.ToString().c_str());
+  XCTAssertTrue(status.ok(), @"%s", std::string(status.message()).c_str());
 }
 
 @end

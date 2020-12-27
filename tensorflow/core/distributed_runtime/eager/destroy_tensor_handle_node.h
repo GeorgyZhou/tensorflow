@@ -30,67 +30,44 @@ namespace eager {
 class DestroyTensorHandleNode : public tensorflow::AsyncEagerNode {
  public:
   DestroyTensorHandleNode(std::unique_ptr<EnqueueRequest> request,
-                          EagerContext* ctx, const string& remote_task,
+                          core::RefCountPtr<EagerClient> eager_client,
                           bool ready)
       : tensorflow::AsyncEagerNode(),
         request_(std::move(request)),
-        ctx_(ctx),
-        remote_task_(remote_task),
-        ready_(ready) {
-    ctx_->Ref();
-  }
+        eager_client_(std::move(eager_client)),
+        ready_(ready) {}
 
-  ~DestroyTensorHandleNode() override { ctx_->Unref(); }
+  ~DestroyTensorHandleNode() override {}
 
   void RunAsync(StatusCallback done) override {
-    auto context_id = request_->context_id();
-    if (ctx_->GetContextId() != context_id) {
-      // This means that this tensor was pointing to a remote device, which
-      // has been changed out from under us. Simply return since there is
-      // nothing we can do.
-      done(Status::OK());
-      return;
-    }
-
-    eager::EagerClient* eager_client;
-    Status status = ctx_->GetClient(remote_task_, &eager_client);
-    if (!status.ok()) {
-      LOG(INFO) << "Unable to destroy remote tensor handle because the target "
-                << remote_task_ << " is no longer available.";
-      done(Status::OK());
-      return;
-    }
-
     EnqueueResponse* response = new EnqueueResponse;
     bool ready = ready_;
-    auto context = ctx_;
-    context->Ref();
     // NOTE(fishx): Don't use StreamingEnqueueAsync here. When a
     // StreamingEnqueueAsync request fails all following requests will fail as
     // well. We don't want this request poison following requests since it is
     // safe to ignore a failing destroy tensor handle request.
-    eager_client->EnqueueAsync(
-        request_.get(), response,
-        [response, ready, context, context_id,
-         done](const tensorflow::Status& s) {
+    eager_client_->EnqueueAsync(
+        /*call_opts=*/nullptr, request_.get(), response,
+        [response, ready, done](const tensorflow::Status& s) {
           // Omit the warning if:
           // 1. The remote tensor isn't ready.
-          // 2. ServerDef has been reset.
-          // 3. Lost connection to remote worker. In this case client will
+          // 2. Lost connection to remote worker. In this case client will
           //    crash. We don't want to spam user with redundant warning logs.
-          if (!s.ok() && ready && context->GetContextId() == context_id &&
-              s.code() != errors::Code::UNAVAILABLE) {
-            LOG(WARNING) << "Ignoring an error encountered when deleting "
-                            "remote tensors handles: "
-                         << s.ToString();
+          if (!s.ok() && ready && s.code() != errors::Code::UNAVAILABLE) {
+            LOG_EVERY_N_SEC(WARNING, 60)
+                << "Ignoring an error encountered when deleting "
+                   "remote tensors handles: "
+                << s.ToString();
           }
-          context->Unref();
-          delete response;
           done(Status::OK());
+          delete response;
         });
   }
 
   void Abort(Status status) override {}
+
+  // Remote node deletions are best effort
+  bool Fatal() const override { return false; }
 
   string DebugString() const override {
     string out = "[DestroyTensorHandleNode]";
@@ -100,7 +77,7 @@ class DestroyTensorHandleNode : public tensorflow::AsyncEagerNode {
 
  private:
   std::unique_ptr<EnqueueRequest> request_;
-  EagerContext* ctx_;
+  core::RefCountPtr<EagerClient> eager_client_;
   const string remote_task_;
   bool ready_;
 };

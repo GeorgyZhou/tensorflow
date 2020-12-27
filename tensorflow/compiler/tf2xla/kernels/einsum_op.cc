@@ -25,8 +25,9 @@ limitations under the License.
 namespace tensorflow {
 namespace {
 
-constexpr std::array<DataType, 6> kEinsumTypes = {
-    {DT_HALF, DT_BFLOAT16, DT_FLOAT, DT_DOUBLE, DT_COMPLEX64, DT_COMPLEX128}};
+constexpr std::array<DataType, 7> kEinsumTypes = {
+    {DT_INT32, DT_HALF, DT_BFLOAT16, DT_FLOAT, DT_DOUBLE, DT_COMPLEX64,
+     DT_COMPLEX128}};
 
 // Kernel which compiles XlaEinsum, an einsum op accepting two inputs.
 class XlaEinsumOp : public XlaOpKernel {
@@ -39,7 +40,7 @@ class XlaEinsumOp : public XlaOpKernel {
 
   void Compile(XlaOpKernelContext* ctx) override {
     xla::XlaOp lhs = ctx->Input(0);
-    if (equation_.find(",") == equation_.npos) {
+    if (equation_.find(',') == equation_.npos) {
       ctx->SetOutput(0, xla::Einsum(lhs, equation_));
     } else {
       xla::XlaOp rhs = ctx->Input(1);
@@ -67,7 +68,7 @@ class EinsumOp : public XlaOpKernel {
     OP_REQUIRES_OK(ctx,
                    ctx->InputList("inputs", &input_handles, &input_shapes));
 
-    if (equation_.find(",") == equation_.npos) {
+    if (equation_.find(',') == equation_.npos) {
       OP_REQUIRES(
           ctx, input_handles.size() == 1,
           errors::InvalidArgument(
